@@ -1,0 +1,4 @@
+# Straighten is already static. Publish the repository root as-is.
+[build]
+  publish = "."
+  command = "echo No build step"

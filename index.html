@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Straighten — Perspective correction</title>
+  <meta name="description" content="Correct the perspective of a wall, window, or artwork in the browser. Photos are never uploaded.">
+  <meta name="theme-color" content="#f3efe7">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23f3efe7'/%3E%3Cpath d='M7 8h10v14H7zM18 11l8 2-1.5 12L16.5 23z' fill='none' stroke='%23243f34' stroke-width='1.6'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,620&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div>
+        <p class="eyebrow"><span class="swatch" aria-hidden="true"></span> Perspective correction</p>
+        <h1>Straighten</h1>
+      </div>
+      <p class="lede">Square up a wall, a window, or a framed piece. Mark the four corners, set the proportion if you know it, and export a flat image. The file never leaves this device.</p>
+    </header>
+
+    <div id="dropzone" class="dropzone">
+      <div class="drop-inner">
+        <svg class="drop-icon" viewBox="0 0 64 48" aria-hidden="true">
+          <path d="M6 10h28l6 8h18v22H6z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M18 14h16l4 6 8-2-6 16H14z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        </svg>
+        <h2>Drop a photo</h2>
+        <p>JPEG, PNG, WebP, or HEIC when the browser can read it. Phone photos, including large ones, stay on this device.</p>
+        <div class="drop-actions">
+          <button type="button" class="primary" id="browse">Browse</button>
+          <button type="button" class="ghost" id="sample-button">Use the sample wall</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="workspace" class="workspace" hidden>
+      <div class="boards">
+        <section class="board">
+          <div class="board-head">
+            <div>
+              <h2>Source</h2>
+              <p id="file-meta" class="meta"></p>
+            </div>
+            <div class="board-actions">
+              <button type="button" class="ghost" id="undo" disabled>Undo</button>
+              <button type="button" class="ghost" id="reset">Reset</button>
+              <button type="button" class="ghost" id="replace">Replace</button>
+            </div>
+          </div>
+          <ol class="corners" id="corners">
+            <li data-step="0">Top left</li>
+            <li data-step="1">Top right</li>
+            <li data-step="2">Bottom left</li>
+            <li data-step="3">Bottom right</li>
+          </ol>
+          <p id="hint" class="hint">Click the top-left corner</p>
+          <div class="frame" id="source-frame">
+            <canvas id="source-canvas" aria-label="Photo. Click the corners in the order shown."></canvas>
+          </div>
+        </section>
+
+        <section class="board">
+          <div class="board-head">
+            <div>
+              <h2>Corrected</h2>
+              <p class="meta">Live preview</p>
+            </div>
+            <p id="renderer" class="meta renderer"></p>
+          </div>
+          <p class="hint quiet">Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.</p>
+          <div class="frame preview-frame" id="preview-frame">
+            <p id="preview-empty" class="preview-empty">The rectangle appears here after the fourth corner.</p>
+            <canvas id="preview-canvas" hidden></canvas>
+          </div>
+        </section>
+      </div>
+
+      <aside class="panel">
+        <section>
+          <h2>Frame</h2>
+          <div class="choice">
+            <label>
+              <input type="radio" name="frame" id="mode-crop" value="crop" checked>
+              <span>Crop to the rectangle</span>
+            </label>
+            <label>
+              <input type="radio" name="frame" id="mode-full" value="full">
+              <span>Keep surroundings</span>
+            </label>
+          </div>
+        </section>
+
+        <section>
+          <h2>Proportion</h2>
+          <p id="aspect-readout" class="ratio">—</p>
+          <p id="proportion-note" class="note">The estimate appears once all four corners are placed.</p>
+          <div class="pair">
+            <label>
+              Width
+              <input id="real-width" type="number" inputmode="decimal" min="0" step="any" placeholder="3.2" autocomplete="off">
+            </label>
+            <label>
+              Height
+              <input id="real-height" type="number" inputmode="decimal" min="0" step="any" placeholder="2.4" autocomplete="off">
+            </label>
+          </div>
+        </section>
+
+        <section>
+          <h2>Export</h2>
+          <div class="choice">
+            <label>
+              <input type="radio" name="format" id="format-jpeg" value="jpeg" checked>
+              <span>JPEG</span>
+            </label>
+            <label>
+              <input type="radio" name="format" id="format-png" value="png">
+              <span>PNG</span>
+            </label>
+          </div>
+          <div id="quality-row" class="quality">
+            <label for="quality">JPEG quality <span id="quality-value">92%</span></label>
+            <input id="quality" type="range" min="60" max="100" value="92">
+          </div>
+          <p class="export-line"><span id="export-meta">—</span></p>
+          <button type="button" class="primary download" id="download" disabled>Download JPEG</button>
+          <p id="status" class="status" role="status"></p>
+        </section>
+
+        <p class="privacy">Nothing is uploaded. Closing the tab discards the photo.</p>
+      </aside>
+    </div>
+  </div>
+
+  <input id="file-input" class="sr" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif">
+  <div id="loupe" class="loupe" hidden><canvas id="loupe-canvas" width="168" height="168"></canvas></div>
+  <div id="veil" class="veil" hidden><p>Drop to open the photo</p></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
