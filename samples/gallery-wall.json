@@ -1,0 +1,27 @@
+{
+  "width": 1700,
+  "height": 1140,
+  "corners": {
+    "topLeft": {
+      "x": 470,
+      "y": 230
+    },
+    "topRight": {
+      "x": 1210,
+      "y": 280
+    },
+    "bottomLeft": {
+      "x": 420,
+      "y": 820
+    },
+    "bottomRight": {
+      "x": 1275,
+      "y": 890
+    }
+  },
+  "edgeAspect": 1.3268,
+  "artwork": {
+    "width": 1000,
+    "height": 754
+  }
+}
