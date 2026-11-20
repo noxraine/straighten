@@ -154,6 +154,186 @@ export function quadProblem(quad) {
 }
 
 /**
+ * Blend a homography toward the identity. `strength` is 0–1.
+ * 1 keeps H (the fully frontal correction). 0 leaves the photo untouched.
+ * Matrices are scaled so the last entry is 1 when that is safe, then blended
+ * linearly. Projective maps are unchanged by scale, so strength 1 matches H.
+ */
+export function blendTowardIdentity(H, strength) {
+  const t = clamp01(Number(strength));
+  if (!(t < 0.9995)) return H.slice();
+  const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  if (!(t > 0.0005)) return identity;
+  const normalized = normalizeForBlend(H);
+  return normalized.map((value, index) => value * t + identity[index] * (1 - t));
+}
+
+/**
+ * Fit the whole source photo into the output after H.
+ *
+ * The four image corners (and the edges between them) are mapped through H.
+ * Their bounding box is translated to the origin and, when it is larger than
+ * `maxEdge`, scaled uniformly so every finite corner still lands inside the
+ * canvas. A corner on or behind the horizon (w too small) is pulled forward
+ * to a finite stand-in and flagged with `clamped`, instead of letting the
+ * frame blow up.
+ */
+export function fitFrame(H, srcW, srcH, options = {}) {
+  const cap = 4 * Math.hypot(srcW, srcH);
+  const samples = imageBoundarySamples(srcW, srcH);
+  let clamped = false;
+  const mapped = samples.map((sample) => {
+    const hit = projectFinite(H, sample.x, sample.y, srcW, srcH, cap);
+    hit.corner = sample.corner;
+    if (hit.clamped) clamped = true;
+    return hit;
+  });
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of mapped) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+  const pad = 1;
+  minX -= pad;
+  minY -= pad;
+  maxX += pad;
+  maxY += pad;
+
+  const spanX = Math.max(maxX - minX, 1);
+  const spanY = Math.max(maxY - minY, 1);
+  let uniformScale = 1;
+  const maxEdge = Number(options.maxEdge);
+  if (Number.isFinite(maxEdge) && maxEdge > 0) {
+    const edge = Math.max(spanX, spanY);
+    if (edge > maxEdge) uniformScale = maxEdge / edge;
+  }
+  const width = Math.max(2, Math.round(spanX * uniformScale));
+  const height = Math.max(2, Math.round(spanY * uniformScale));
+  return {
+    originX: minX,
+    originY: minY,
+    spanX,
+    spanY,
+    width,
+    height,
+    uniformScale,
+    clamped,
+    corners: mapped.filter((point) => point.corner),
+  };
+}
+
+/** Where a destination-space point lands on the fitted canvas. */
+export function placeOnFrame(fit, x, y) {
+  return {
+    x: ((x - fit.originX) / fit.spanX) * fit.width,
+    y: ((y - fit.originY) / fit.spanY) * fit.height,
+  };
+}
+
+function imageBoundarySamples(srcW, srcH) {
+  const corners = [
+    { x: 0, y: 0 },
+    { x: srcW, y: 0 },
+    { x: srcW, y: srcH },
+    { x: 0, y: srcH },
+  ];
+  const samples = [];
+  const steps = 8;
+  for (let edge = 0; edge < 4; edge++) {
+    const a = corners[edge];
+    const b = corners[(edge + 1) % 4];
+    for (let step = 0; step < steps; step++) {
+      const t = step / steps;
+      samples.push({
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        corner: step === 0,
+      });
+    }
+  }
+  return samples;
+}
+
+function projectFinite(H, x, y, srcW, srcH, cap) {
+  const cx = srcW / 2;
+  const cy = srcH / 2;
+  const w = H[6] * x + H[7] * y + H[8];
+  const anchor = anchorPoint(H, cx, cy);
+  if (w > 1e-4) {
+    const projected = applyHomography(H, x, y);
+    if (Number.isFinite(projected.x) && Number.isFinite(projected.y)) {
+      return capDistance(projected, anchor, cap, false);
+    }
+  }
+  const wc = H[6] * cx + H[7] * cy + H[8];
+  if (!(wc > 1e-3)) return { x: anchor.x, y: anchor.y, clamped: true };
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 28; i++) {
+    const mid = (lo + hi) / 2;
+    const px = cx + (x - cx) * mid;
+    const py = cy + (y - cy) * mid;
+    const wm = H[6] * px + H[7] * py + H[8];
+    if (wm > 1e-3) lo = mid;
+    else hi = mid;
+  }
+  const px = cx + (x - cx) * lo * 0.985;
+  const py = cy + (y - cy) * lo * 0.985;
+  const projected = applyHomography(H, px, py);
+  if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
+    return { x: anchor.x, y: anchor.y, clamped: true };
+  }
+  return capDistance(projected, anchor, cap, true);
+}
+
+function anchorPoint(H, cx, cy) {
+  const w = H[6] * cx + H[7] * cy + H[8];
+  if (w > 1e-3) {
+    const projected = applyHomography(H, cx, cy);
+    if (Number.isFinite(projected.x) && Number.isFinite(projected.y)) return projected;
+  }
+  return { x: cx, y: cy };
+}
+
+function capDistance(point, anchor, cap, alreadyClamped) {
+  const dx = point.x - anchor.x;
+  const dy = point.y - anchor.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist <= cap) return { x: point.x, y: point.y, clamped: alreadyClamped };
+  const scale = cap / (dist || 1);
+  return {
+    x: anchor.x + dx * scale,
+    y: anchor.y + dy * scale,
+    clamped: true,
+  };
+}
+
+function normalizeForBlend(H) {
+  let pivot = H[8];
+  if (Math.abs(pivot) < 1e-8) {
+    pivot = H[0];
+    for (const value of H) {
+      if (Math.abs(value) > Math.abs(pivot)) pivot = value;
+    }
+  }
+  const scale = (pivot < 0 ? -1 : 1) / (Math.abs(pivot) || 1);
+  return H.map((value) => value * scale);
+}
+
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 1;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+/**
  * Axis-aligned bounds of the source image after H, expanded to include the
  * destination rectangle. Returns null when a corner shoots off to infinity
  * or the frame would be unreasonably large.

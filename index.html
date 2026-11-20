@@ -19,7 +19,7 @@
         <p class="eyebrow"><span class="swatch" aria-hidden="true"></span> Perspective correction</p>
         <h1>Straighten</h1>
       </div>
-      <p class="lede">Square up a wall, a window, or a framed piece. Mark the four corners, set the proportion if you know it, and export a flat image. The file never leaves this device.</p>
+      <p class="lede">Mark a wall or window. Straighten rebuilds the shot as if you had stepped square to it, and keeps the ceiling, floor, and the rest of the room in frame. The file never leaves this device.</p>
     </header>
 
     <div id="dropzone" class="dropzone">
@@ -33,6 +33,7 @@
         <div class="drop-actions">
           <button type="button" class="primary" id="browse">Browse</button>
           <button type="button" class="ghost" id="sample-button">Use the sample wall</button>
+          <button type="button" class="ghost" id="room-button">Use the sample room</button>
         </div>
       </div>
     </div>
@@ -73,7 +74,7 @@
           </div>
           <p class="hint quiet">Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.</p>
           <div class="frame preview-frame" id="preview-frame">
-            <p id="preview-empty" class="preview-empty">The rectangle appears here after the fourth corner.</p>
+            <p id="preview-empty" class="preview-empty">The frontal view appears here after the fourth corner.</p>
             <canvas id="preview-canvas" hidden></canvas>
           </div>
         </section>
@@ -84,14 +85,20 @@
           <h2>Frame</h2>
           <div class="choice">
             <label>
-              <input type="radio" name="frame" id="mode-crop" value="crop" checked>
-              <span>Crop to the rectangle</span>
+              <input type="radio" name="frame" id="mode-full" value="full" checked>
+              <span>Whole photo</span>
             </label>
             <label>
-              <input type="radio" name="frame" id="mode-full" value="full">
-              <span>Keep surroundings</span>
+              <input type="radio" name="frame" id="mode-crop" value="crop">
+              <span>Crop to selection</span>
             </label>
           </div>
+          <p id="frame-note" class="note">Straightens the marked surface and keeps the rest of the room in frame. Empty corners stay transparent in PNG and white in JPEG.</p>
+          <div class="quality">
+            <label for="strength">Correction <span id="strength-value">100%</span></label>
+            <input id="strength" type="range" min="0" max="100" value="100">
+          </div>
+          <p class="note">100% looks straight at the wall. Lower it for a gentler shift.</p>
         </section>
 
         <section>

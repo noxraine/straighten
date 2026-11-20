@@ -12,7 +12,7 @@
  * since the on-screen result is small.
  */
 
-import { applyHomography, invert3x3, transformedImageBounds } from "./homography.js";
+import { applyHomography, fitFrame, invert3x3 } from "./homography.js";
 
 const MAX_OUTPUT_DIM = 16384;
 const MAX_OUTPUT_AREA = 64_000_000;
@@ -177,7 +177,7 @@ let renderChain = Promise.resolve();
  * H maps source pixels into destination space, where the corrected quad
  * occupies [0, destWidth] × [0, destHeight].
  *
- * options.mode: "crop" keeps that rectangle, "full" expands to the warped photo.
+ * options.mode: "full" fits the whole photo (default for the app), "crop" keeps the rectangle.
  * options.maxEdge: longest output edge, used for the live preview.
  * options.textureLimit: test override for the texture-size budget.
  * options.onProgress: called with 0..1 during a CPU export.
@@ -201,19 +201,20 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
   let originY = 0;
   let spanX = destWidth;
   let spanY = destHeight;
+  let outW = Math.max(2, Math.round(destWidth));
+  let outH = Math.max(2, Math.round(destHeight));
+  let clamped = false;
   if (mode === "full") {
-    const bounds = transformedImageBounds(H, srcW, srcH, destWidth, destHeight);
-    if (!bounds) {
-      throw new Error("The surroundings explode under this perspective. Crop to the rectangle instead.");
-    }
-    originX = bounds.minX;
-    originY = bounds.minY;
-    spanX = bounds.width;
-    spanY = bounds.height;
+    const fit = fitFrame(H, srcW, srcH);
+    originX = fit.originX;
+    originY = fit.originY;
+    spanX = fit.spanX;
+    spanY = fit.spanY;
+    outW = fit.width;
+    outH = fit.height;
+    clamped = fit.clamped;
   }
 
-  let outW = Math.max(2, Math.round(spanX));
-  let outH = Math.max(2, Math.round(spanY));
   if (Number.isFinite(options.maxEdge) && options.maxEdge > 0) {
     const edge = Math.max(outW, outH);
     if (edge > options.maxEdge) {
@@ -256,6 +257,7 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
     width: outW,
     height: outH,
     capped: fitted.capped,
+    clamped,
     renderer,
   };
 }

@@ -1,9 +1,10 @@
 import {
+  blendTowardIdentity,
+  fitFrame,
   planRectangle,
   quadProblem,
   rectangleTargets,
   solveHomography,
-  transformedImageBounds,
 } from "./homography.js";
 import { createPointPicker } from "./point-picker.js";
 import { fitOutputSize, renderWarp } from "./warp.js";
@@ -33,6 +34,10 @@ const downloadButton = $("download");
 const quality = $("quality");
 const qualityValue = $("quality-value");
 const qualityRow = $("quality-row");
+const strength = $("strength");
+const strengthValue = $("strength-value");
+const frameNote = $("frame-note");
+const roomButton = $("room-button");
 const statusEl = $("status");
 const veil = $("veil");
 
@@ -54,7 +59,8 @@ let previewRunning = false;
 
 browse.addEventListener("click", () => fileInput.click());
 replaceButton.addEventListener("click", () => fileInput.click());
-sampleButton.addEventListener("click", () => openSample());
+sampleButton.addEventListener("click", () => openSample("samples/gallery-wall.png", "gallery-wall.png", "Opening the sample wall…", sampleButton));
+roomButton.addEventListener("click", () => openSample("samples/room.png", "room.png", "Opening the sample room…", roomButton));
 fileInput.addEventListener("change", () => {
   const file = fileInput.files && fileInput.files[0];
   fileInput.value = "";
@@ -64,9 +70,10 @@ undoButton.addEventListener("click", () => picker.undo());
 resetButton.addEventListener("click", () => picker.reset());
 downloadButton.addEventListener("click", () => download());
 
-for (const input of [realWidth, realHeight, quality]) {
+for (const input of [realWidth, realHeight, quality, strength]) {
   input.addEventListener("input", () => {
     if (input === quality) qualityValue.textContent = `${quality.value}%`;
+    if (input === strength) strengthValue.textContent = `${strength.value}%`;
     schedulePreview(false);
   });
 }
@@ -74,6 +81,9 @@ for (const input of document.querySelectorAll('input[name="frame"], input[name="
   input.addEventListener("change", () => {
     qualityRow.hidden = !jpegSelected();
     downloadButton.textContent = jpegSelected() ? "Download JPEG" : "Download PNG";
+    frameNote.textContent = frameMode() === "full"
+      ? "Straightens the marked surface and keeps the rest of the room in frame. Empty corners stay transparent in PNG and white in JPEG."
+      : "Exports only the surface you marked.";
     schedulePreview(false);
   });
 }
@@ -115,18 +125,18 @@ window.addEventListener("drop", (event) => {
   openFile(file);
 });
 
-async function openSample() {
-  setStatus("Opening the sample wall…");
-  sampleButton.disabled = true;
+async function openSample(url, name, message, button) {
+  setStatus(message);
+  button.disabled = true;
   try {
-    const response = await fetch("samples/gallery-wall.png");
+    const response = await fetch(url);
     if (!response.ok) throw new Error("Sample photo is missing.");
     const blob = await response.blob();
-    await openFile(new File([blob], "gallery-wall.png", { type: "image/png" }));
+    await openFile(new File([blob], name, { type: "image/png" }));
   } catch (error) {
     setStatus(error.message || "Could not open the sample.", true);
   } finally {
-    sampleButton.disabled = false;
+    button.disabled = false;
   }
 }
 
@@ -204,13 +214,15 @@ async function renderPreview(fast) {
     const full = exportSize(plan);
     exportMeta.textContent = full
       ? `${full.width.toLocaleString()} × ${full.height.toLocaleString()} px`
-      : "Crop to the rectangle for this perspective.";
+      : "—";
     rendererNote.textContent = result.renderer === "webgl" ? "WebGL" : "CPU";
     downloadButton.disabled = !full;
-    if (!full && frameMode() === "full") {
-      setStatus("The surroundings explode under this perspective. Crop to the rectangle instead.", true);
-    } else if (!latest.dragging) {
-      setStatus("");
+    if (!latest.dragging) {
+      if (result.clamped && frameMode() === "full") {
+        setStatus("The perspective runs off the edge of the shot, so that part was held in. The rest of the photo stays in frame.");
+      } else {
+        setStatus("");
+      }
     }
   } catch (error) {
     showPreview(null);
@@ -253,12 +265,19 @@ function currentPlan() {
   }
   let H;
   try {
-    H = solveHomography(latest.points, rectangleTargets(rect.width, rect.height));
+    H = homographyFor(latest.points, rect);
   } catch (error) {
     setStatus(error.message, true);
     return null;
   }
   return { rect, H };
+}
+
+function homographyFor(points, rect) {
+  return blendTowardIdentity(
+    solveHomography(points, rectangleTargets(rect.width, rect.height)),
+    Number(strength.value) / 100,
+  );
 }
 
 function refreshReadouts() {
@@ -289,7 +308,7 @@ function refreshReadouts() {
   }
   const plan = { rect, H: null };
   try {
-    plan.H = solveHomography(latest.points, rectangleTargets(rect.width, rect.height));
+    plan.H = homographyFor(latest.points, rect);
   } catch {
     return;
   }
@@ -301,15 +320,11 @@ function refreshReadouts() {
 
 function exportSize(plan) {
   if (!photo || !plan) return null;
-  let width = plan.rect.width;
-  let height = plan.rect.height;
   if (frameMode() === "full") {
-    const bounds = transformedImageBounds(plan.H, photo.width, photo.height, width, height);
-    if (!bounds) return null;
-    width = bounds.width;
-    height = bounds.height;
+    const fit = fitFrame(plan.H, photo.width, photo.height);
+    return fitOutputSize(fit.width, fit.height);
   }
-  return fitOutputSize(Math.round(width), Math.round(height));
+  return fitOutputSize(plan.rect.width, plan.rect.height);
 }
 
 async function download() {
@@ -358,7 +373,7 @@ function canvasToBlob(canvas, type, qualityValueNumber) {
   matte.width = canvas.width;
   matte.height = canvas.height;
   const ctx = matte.getContext("2d");
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = "#f4f1eb";
   ctx.fillRect(0, 0, matte.width, matte.height);
   ctx.drawImage(canvas, 0, 0);
   return new Promise((resolve) => matte.toBlob(resolve, type, qualityValueNumber));
