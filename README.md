@@ -1,14 +1,14 @@
 # Straighten
 
-Perspective correction for interior photos. Mark the four corners of a wall, window, floor, or piece of art and export a flat rectangle. Everything runs in the browser. Photos are not uploaded.
+Perspective correction for interior photos. Mark the four corners of a wall or window and the shot is rebuilt as if the camera had been square to that surface. The rest of the room stays in frame. Everything runs in the browser. Photos are not uploaded.
 
 ## Use it
 
 1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
 2. Click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back.
-3. The corrected preview updates as you drag. “Crop to the rectangle” keeps only the surface you marked. “Keep surroundings” warps the whole photo so the wall stays in context.
+3. The corrected preview updates as you drag. **Whole photo** is the default: the marked surface becomes frontal and the ceiling, floor, and surrounding walls stay in frame. **Crop to selection** keeps only that surface. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
 4. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
-5. Download a JPEG (with a quality slider) or a PNG. The export is full resolution, up to what the browser can encode.
+5. Download a JPEG (white fill in the empty corners, with a quality slider) or a PNG (those corners stay transparent). The export is full resolution, up to what the browser can encode.
 
 Mouse and touch both work, including on an iPad.
 
@@ -49,7 +49,7 @@ Connect the repo in Netlify, or drag this folder onto [Netlify Drop](https://app
 
 ## How the correction works
 
-Four point pairs fix an 8-degree-of-freedom homography. `homography.js` normalizes the points, builds the Direct Linear Transform matrix, and solves for its nullspace. The preview and the export then walk the output backwards: each pixel is sent through the inverse homography and sampled from the photo.
+Four point pairs fix an 8-degree-of-freedom homography. `homography.js` normalizes the points, builds the Direct Linear Transform matrix, and solves for its nullspace. The preview and the export then walk the output backwards: each pixel is sent through the inverse homography and sampled from the photo. In whole-photo mode the four corners of the source are mapped through that homography, the bounding box is translated to the origin, and it is scaled uniformly so the entire photo fits. A corner that falls on or behind the horizon is held at a finite distance instead of blowing the canvas up.
 
 `warp.js` does that sampling in a WebGL fragment shader (bilinear). If the photo is larger than the GPU’s texture limit, the export is tiled and each tile uploads only the source region it needs. If WebGL is unavailable, the same mapping runs on the CPU.
 

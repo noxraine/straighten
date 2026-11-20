@@ -5,7 +5,15 @@
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { deflateSync } from "node:zlib";
-import { invert3x3, planRectangle, rectangleTargets, solveHomography } from "../homography.js";
+import {
+  applyHomography,
+  fitFrame,
+  invert3x3,
+  placeOnFrame,
+  planRectangle,
+  rectangleTargets,
+  solveHomography,
+} from "../homography.js";
 import { warpBuffer } from "../warp.js";
 
 const GLYPHS = {
@@ -75,6 +83,7 @@ writeFileSync(
 console.log(`wrote samples/gallery-wall.png (${png.length} bytes)`);
 console.log(`quad aspect ${plan.aspect.toFixed(4)}, artwork ${artW}x${artH}, corrected ${plan.width}x${plan.height}`);
 console.log(`center ${center} corner ${corner}`);
+buildRoomPhoto();
 
 function drawRoom(w, h) {
   const data = new Uint8ClampedArray(w * h * 4);
@@ -293,4 +302,75 @@ function crc32(buf) {
     for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
   }
   return ~c;
+}
+
+function buildRoomPhoto() {
+  const w = 1200;
+  const h = 800;
+  const frontal = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let r;
+      let g;
+      let b;
+      const inWindow = x >= 470 && x < 790 && y >= 230 && y < 500;
+      const inFrame = x >= 448 && x < 812 && y >= 208 && y < 522;
+      if (y < 150) {
+        r = 168; g = 204; b = 214;
+      } else if (y >= 630) {
+        r = 124; g = 86; b = 56;
+      } else if (x < 150) {
+        r = 186; g = 154; b = 128;
+      } else {
+        r = 230; g = 216; b = 198;
+      }
+      if (inFrame) { r = 48; g = 34; b = 26; }
+      if (inWindow) { r = 126; g = 176; b = 206; }
+      const i = (y * w + x) * 4;
+      frontal[i] = r;
+      frontal[i + 1] = g;
+      frontal[i + 2] = b;
+      frontal[i + 3] = 255;
+    }
+  }
+  const Hview = [1.05, 0.09, -28, -0.02, 1.03, 12, 0.00015, -0.00004, 1];
+  const photo = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = applyHomography(Hview, x + 0.5, y + 0.5);
+      const sx = Math.min(w - 1, Math.max(0, Math.round(p.x)));
+      const sy = Math.min(h - 1, Math.max(0, Math.round(p.y)));
+      const si = (sy * w + sx) * 4;
+      const di = (y * w + x) * 4;
+      photo[di] = frontal[si];
+      photo[di + 1] = frontal[si + 1];
+      photo[di + 2] = frontal[si + 2];
+      photo[di + 3] = 255;
+    }
+  }
+  const Hinv = invert3x3(Hview);
+  const windowFrontal = [
+    { x: 448, y: 208 },
+    { x: 812, y: 208 },
+    { x: 448, y: 522 },
+    { x: 812, y: 522 },
+  ];
+  const windowPhoto = windowFrontal.map((point) => applyHomography(Hinv, point.x, point.y));
+  const plan = planRectangle(windowPhoto);
+  const H = solveHomography(windowPhoto, rectangleTargets(plan.width, plan.height));
+  const fit = fitFrame(H, w, h);
+  for (const [x, y] of [[0, 0], [w, 0], [w, h], [0, h]]) {
+    const mapped = applyHomography(H, x, y);
+    const placed = placeOnFrame(fit, mapped.x, mapped.y);
+    if (placed.x < -1 || placed.y < -1 || placed.x > fit.width + 1 || placed.y > fit.height + 1) {
+      throw new Error(`room corner cropped at ${placed.x}, ${placed.y}`);
+    }
+  }
+  writeFileSync(new URL("../samples/room.png", import.meta.url), encodePNG(w, h, photo));
+  writeFileSync(new URL("../samples/room.json", import.meta.url), JSON.stringify({
+    width: w,
+    height: h,
+    window: windowPhoto.map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) })),
+  }, null, 2));
+  console.log(`wrote samples/room.png, window ${JSON.stringify(windowPhoto.map((p) => [Math.round(p.x), Math.round(p.y)]))}`);
 }

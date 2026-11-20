@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import {
   HomographyError,
   applyHomography,
+  blendTowardIdentity,
+  fitFrame,
   invert3x3,
   measureQuad,
   multiply3x3,
+  placeOnFrame,
   planRectangle,
   quadProblem,
   rectangleTargets,
@@ -176,6 +179,105 @@ test("transformedImageBounds returns null when a corner is at infinity", () => {
   const bounds = transformedImageBounds(H, 100, 50, 100, 50);
   assert.equal(bounds, null);
 });
+
+test("fitFrame keeps every source corner inside the output", () => {
+  const srcW = 200;
+  const srcH = 120;
+  const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const fitted = fitFrame(identity, srcW, srcH);
+  assert.equal(fitted.clamped, false);
+  closeTo(fitted.spanX, srcW + 2, 1e-6, "spanX");
+  closeTo(fitted.spanY, srcH + 2, 1e-6, "spanY");
+  assertCornersInside(identity, srcW, srcH, fitted);
+
+  const shifted = [1, 0, 30, 0, 1, -12, 0, 0, 1];
+  const moved = fitFrame(shifted, srcW, srcH);
+  assert.equal(moved.clamped, false);
+  closeTo(moved.spanX, srcW + 2, 1e-6, "shifted spanX");
+  closeTo(moved.spanY, srcH + 2, 1e-6, "shifted spanY");
+  assertCornersInside(shifted, srcW, srcH, moved);
+});
+
+test("fitFrame scales uniformly when the corrected photo is larger than maxEdge", () => {
+  const H = [4, 0, 0, 0, 4, 0, 0, 0, 1];
+  const fit = fitFrame(H, 100, 40, { maxEdge: 80 });
+  assert.ok(fit.width <= 80, `width ${fit.width}`);
+  assert.ok(fit.height <= 80, `height ${fit.height}`);
+  const scaleX = fit.width / fit.spanX;
+  const scaleY = fit.height / fit.spanY;
+  closeTo(scaleX, scaleY, 0.02, "uniform scale");
+  closeTo(scaleX, fit.uniformScale, 0.02, "stored scale");
+  assert.ok(fit.uniformScale < 1);
+  assertCornersInside(H, 100, 40, fit);
+});
+
+test("fitFrame holds a corner that falls behind the horizon", () => {
+  const H = [1, 0, 0, 0, 1, 0, 0, 0.02, -0.5];
+  const srcW = 100;
+  const srcH = 80;
+  const behind = applyHomography(H, 0, 0);
+  assert.ok(!Number.isFinite(behind.x) || H[6] * 0 + H[7] * 0 + H[8] <= 0);
+  const fit = fitFrame(H, srcW, srcH);
+  assert.equal(fit.clamped, true);
+  assert.ok(Number.isFinite(fit.width) && Number.isFinite(fit.height));
+  assert.ok(fit.width < 5000 && fit.height < 5000, `${fit.width}x${fit.height}`);
+  for (const point of fit.corners) {
+    assert.ok(Number.isFinite(point.x) && Number.isFinite(point.y));
+  }
+});
+
+test("a frontal correction of a quad still contains the whole photo", () => {
+  const srcW = 480;
+  const srcH = 320;
+  const quad = [
+    { x: 80, y: 50 },
+    { x: 390, y: 70 },
+    { x: 60, y: 250 },
+    { x: 410, y: 280 },
+  ];
+  const rect = planRectangle(quad);
+  const H = solveHomography(quad, rectangleTargets(rect.width, rect.height));
+  const fit = fitFrame(H, srcW, srcH);
+  assert.equal(fit.clamped, false);
+  assertCornersInside(H, srcW, srcH, fit);
+  assert.ok(fit.width * fit.height > rect.width * rect.height * 0.5);
+});
+
+test("correction strength blends the homography toward identity", () => {
+  const H = [2, 0, 0, 0, 2, 0, 0, 0, 1];
+  pointsClose(applyHomography(blendTowardIdentity(H, 0), 10, 4), { x: 10, y: 4 }, 1e-9);
+  pointsClose(applyHomography(blendTowardIdentity(H, 1), 10, 4), { x: 20, y: 8 }, 1e-9);
+  pointsClose(applyHomography(blendTowardIdentity(H, 0.5), 10, 4), { x: 15, y: 6 }, 1e-9);
+
+  const quad = [
+    { x: 20, y: 20 },
+    { x: 180, y: 30 },
+    { x: 15, y: 140 },
+    { x: 190, y: 150 },
+  ];
+  const solved = solveHomography(quad, rectangleTargets(160, 100));
+  const half = blendTowardIdentity(solved, 0.5);
+  const full = applyHomography(solved, quad[1].x, quad[1].y);
+  const eased = applyHomography(half, quad[1].x, quad[1].y);
+  const fullShift = Math.hypot(full.x - quad[1].x, full.y - quad[1].y);
+  const easedShift = Math.hypot(eased.x - quad[1].x, eased.y - quad[1].y);
+  assert.ok(easedShift < fullShift, `eased ${easedShift} full ${fullShift}`);
+});
+
+function assertCornersInside(H, srcW, srcH, fit) {
+  const corners = [
+    [0, 0],
+    [srcW, 0],
+    [srcW, srcH],
+    [0, srcH],
+  ];
+  for (const [x, y] of corners) {
+    const mapped = applyHomography(H, x, y);
+    const placed = placeOnFrame(fit, mapped.x, mapped.y);
+    assert.ok(placed.x >= -0.6 && placed.x <= fit.width + 0.6, `x ${placed.x} of ${fit.width}`);
+    assert.ok(placed.y >= -0.6 && placed.y <= fit.height + 0.6, `y ${placed.y} of ${fit.height}`);
+  }
+}
 
 function lineIntersection(a, b, c, d) {
   const den = (a.x - b.x) * (c.y - d.y) - (a.y - b.y) * (c.x - d.x);
