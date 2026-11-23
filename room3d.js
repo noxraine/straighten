@@ -5,7 +5,15 @@
  * near opening. Each of the five faces is its own quad homography, so shared edges meet.
  */
 
-import { applyHomography, invert3x3, multiply3x3, solveHomography } from "./homography.js";
+import {
+  applyHomography,
+  blendTowardIdentity,
+  invert3x3,
+  multiply3x3,
+  planRectangle,
+  rectangleTargets,
+  solveHomography,
+} from "./homography.js";
 
 export function defaultFocalLength(imageWidth, fovDegrees = 60) {
   const fov = (fovDegrees * Math.PI) / 180;
@@ -112,37 +120,40 @@ const FACE_INDEX = {
 };
 
 /**
- * Frontal room layout in its own pixel space.
- * The back wall is the axis-aligned rectangle [0, backWidth] × [0, backHeight],
- * aspect width/height, centered on the target vanishing point. The four near
- * corners sit on the rays from that point through the back corners, all at the
- * same depth factor, so the near opening is a scaled, centered copy.
+ * Frontal room layout.
+ * The back wall uses the same rectangle as four-point mode: `planRectangle`
+ * on the four back clicks (or the snapped back corners when no clicks are
+ * passed) and `rectangleTargets`. The vanishing point is that rectangle's
+ * center, horizontally and vertically. The near opening is a uniform scale
+ * of the same rectangle about that center, so the floor and ceiling bands
+ * match and the left and right walls match. There is no eye-height offset.
  */
 export function layoutRoom(model, options = {}) {
-  const aspect = Math.min(20, Math.max(0.05, model.width / model.height));
-  const backHeight = 1000;
-  const backWidth = aspect * backHeight;
+  const backSource = options.backPoints && options.backPoints.length === 4
+    ? options.backPoints
+    : model.wire.slice(0, 4);
+  const rect = options.rect || planRectangle(backSource);
+  const backWidth = rect.width;
+  const backHeight = rect.height;
   const center = { x: backWidth / 2, y: backHeight / 2 };
   const halfW = backWidth / 2;
   const halfH = backHeight / 2;
   const factor = depthFactor(model, options.fovDegrees);
-  const back = [
-    { x: center.x - halfW, y: center.y - halfH },
-    { x: center.x + halfW, y: center.y - halfH },
-    { x: center.x - halfW, y: center.y + halfH },
-    { x: center.x + halfW, y: center.y + halfH },
-  ];
+  const back = rectangleTargets(backWidth, backHeight);
   const near = back.map((point) => ({
     x: center.x + (point.x - center.x) * factor,
     y: center.y + (point.y - center.y) * factor,
   }));
   const targets = [...back, ...near];
+  const sources = backSource.concat(model.wire.slice(4, 8));
+  const strength = Number(options.strength);
   const faces = {};
   for (const name of Object.keys(FACE_INDEX)) {
     const indices = FACE_INDEX[name];
-    const source = indices.map((index) => model.wire[index]);
+    const source = indices.map((index) => sources[index]);
     const target = indices.map((index) => targets[index]);
-    const H = solveHomography(source, target);
+    let H = solveHomography(source, target);
+    if (Number.isFinite(strength)) H = blendTowardIdentity(H, strength);
     faces[name] = { indices, source, target, H, Hinv: invert3x3(H) };
   }
   return {

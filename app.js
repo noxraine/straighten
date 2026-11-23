@@ -11,6 +11,12 @@ import {
 import { createPointPicker } from "./point-picker.js";
 import { adjustCanvas, buildMask, compositeOnWhite, patchAverage, whiteBalanceGains } from "./adjust.js";
 import { compositeFill, fitLongSide, maskFromAlpha } from "./netlify/functions/inpaint-logic.js";
+import {
+  buildHealthRequest,
+  buildInpaintRequest,
+  buildPollRequest,
+  formatAiError,
+} from "./ai-fill.js";
 import { fitRoomFrame, layoutRoom, reconstructBox } from "./room3d.js";
 import { fitOutputSize, renderRoomWarp, renderWarp } from "./warp.js";
 
@@ -130,7 +136,9 @@ whiteBalanceButton.addEventListener("click", () => {
     ? "Click a neutral point on the corrected photo."
     : "Click a point on the result that should be neutral.";
 });
-aiRun.addEventListener("click", () => runAiFill());
+document.addEventListener("click", (event) => {
+  if (event.target instanceof Element && event.target.closest("#ai-run")) runAiFill();
+});
 aiCancel.addEventListener("click", () => {
   if (aiAbort) aiAbort.abort();
 });
@@ -161,9 +169,15 @@ for (const input of document.querySelectorAll('input[name="frame"], input[name="
     qualityRow.hidden = !jpegSelected();
     downloadButton.textContent = jpegSelected() ? "Download JPEG" : "Download PNG";
     frameNote.textContent = frameNoteText();
-    aiPanel.hidden = frameMode() !== "ai";
-    if (frameMode() !== "ai") aiCanvas = null;
+    const ai = frameMode() === "ai";
+    aiPanel.hidden = !ai;
+    if (!ai) {
+      if (aiAbort) aiAbort.abort();
+      aiCanvas = null;
+      showAiBanner("");
+    }
     schedulePreview(false);
+    if (input.name === "frame" && ai) runAiFill();
   });
 }
 
@@ -409,7 +423,12 @@ function currentPlan() {
   if (boxReady()) {
     try {
       const model = reconstructBox(latest.points, latest.near, photo.width, photo.height);
-      const layout = layoutRoom(model, fovOverride());
+      const layout = layoutRoom(model, {
+        backPoints: latest.points,
+        rect,
+        strength: Number(strength.value) / 100,
+        ...fovOverride(),
+      });
       updateLensNote(model);
       return { rect, H: layout.faces.back.H, model, layout };
     } catch (error) {
@@ -689,60 +708,149 @@ function eventToCanvasPixel(canvas, event) {
   return { x: Math.round(x), y: Math.round(y) };
 }
 
+function showAiProgress(message) {
+  aiStatus.textContent = message;
+  console.info("[AI fill]", message);
+}
+
+function showAiBanner(message) {
+  const banner = $("ai-banner");
+  if (!banner) return;
+  banner.hidden = !message;
+  banner.textContent = message || "";
+  if (message) console.error("[AI fill]", message);
+}
+
 async function runAiFill() {
-  if (!lastWarp) {
-    aiStatus.textContent = "Place the four corners first.";
+  if (aiAbort) return;
+  if (frameMode() !== "ai") {
+    $("mode-ai").checked = true;
+    aiPanel.hidden = false;
+  }
+  const plan = currentPlan();
+  if (!plan) {
+    showAiBanner("Place the four corners first.");
+    showAiProgress("");
     return;
   }
   const controller = new AbortController();
   aiAbort = controller;
   aiRun.disabled = true;
   aiCancel.hidden = false;
+  showAiBanner("");
   let predictionId = "";
   let fileIds = [];
   try {
-    aiStatus.textContent = "Preparing the image…";
-    const payload = buildInpaintPayload(lastWarp);
-    aiStatus.textContent = "Sending to Replicate…";
-    let body = await inpaintRequest("POST", payload, controller.signal);
+    const health = buildHealthRequest();
+    console.info("[AI fill] GET", health.url);
+    let healthBody = null;
+    try {
+      const healthResponse = await fetch(health.url, { method: health.method, signal: controller.signal });
+      healthBody = await readAiPayload(healthResponse);
+      console.info("[AI fill] health", healthResponse.status, healthBody.payload);
+      if (!healthResponse.ok) throw formatAiError({ status: healthResponse.status, payload: healthBody.payload });
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      if (error instanceof TypeError) throw Object.assign(new Error(formatAiError({ network: true })), { ai: true });
+      throw error.ai ? error : Object.assign(new Error(String(error.message || error)), { ai: true });
+    }
+    if (healthBody && healthBody.payload && healthBody.payload.tokenPresent === false) {
+      throw Object.assign(new Error("REPLICATE_API_TOKEN is not set."), { ai: true });
+    }
+    showAiProgress("Sending to Replicate…");
+    const rendered = await renderPlan(plan, { maxEdge: 1536 });
+    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    lastWarp = rendered.canvas;
+    const encoded = buildInpaintPayload(lastWarp);
+    const request = buildInpaintRequest(encoded.image, encoded.mask);
+    console.info("[AI fill] POST", request.url);
+    let response;
+    try {
+      response = await fetch(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: JSON.stringify(request.body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      throw Object.assign(new Error(formatAiError({ network: true })), { ai: true });
+    }
+    let body = await readAiBody(response);
     predictionId = body.id || "";
     fileIds = body.fileIds || [];
     const started = Date.now();
     while (body.status === "starting" || body.status === "processing") {
       if (Date.now() - started > 90000) {
-        throw new Error("Timed out after 90 seconds. Showing the scale-to-fit result.");
+        throw Object.assign(new Error(formatAiError({ timeout: true })), { ai: true });
       }
-      aiStatus.textContent = "Filling the empty corners…";
+      showAiProgress("Processing…");
       await delay(1500, controller.signal);
-      const files = encodeURIComponent(fileIds.join(","));
-      body = await inpaintRequest("GET", null, controller.signal, `?id=${encodeURIComponent(body.id)}&files=${files}`);
+      const poll = buildPollRequest(body.id, fileIds);
+      console.info("[AI fill] GET", poll.url);
+      let pollResponse;
+      try {
+        pollResponse = await fetch(poll.url, { method: poll.method, signal: controller.signal });
+      } catch (error) {
+        if (error.name === "AbortError") throw error;
+        throw Object.assign(new Error(formatAiError({ network: true })), { ai: true });
+      }
+      body = await readAiBody(pollResponse);
     }
     if (body.status !== "succeeded" || !body.output) {
-      throw new Error(body.error || "Inpainting failed. Showing the scale-to-fit result.");
+      throw Object.assign(new Error(formatAiError({
+        status: body.code,
+        empty: body.status === "succeeded" && !body.output,
+        payload: body,
+      })), { ai: true });
     }
-    aiStatus.textContent = "Placing the fill back on the photo…";
     aiCanvas = await compositeAiResult(lastWarp, body.output);
     aiKey = warpKey();
     const adjusted = presentCanvas(aiCanvas);
+    previewCanvas.hidden = false;
+    previewEmpty.hidden = true;
     previewCanvas.width = adjusted.width;
     previewCanvas.height = adjusted.height;
     previewCanvas.getContext("2d").drawImage(adjusted, 0, 0);
-    aiStatus.textContent = "Empty corners filled.";
+    showAiBanner("");
+    showAiProgress("Done");
   } catch (error) {
     aiCanvas = null;
     if (error.name === "AbortError") {
-      aiStatus.textContent = "Cancelled. Showing the scale-to-fit result.";
+      showAiBanner("");
+      showAiProgress("Cancelled. Showing the scale-to-fit result.");
       if (predictionId) {
-        const files = encodeURIComponent(fileIds.join(","));
-        fetch(`/.netlify/functions/inpaint?id=${encodeURIComponent(predictionId)}&files=${files}&cancel=1`).catch(() => {});
+        const poll = buildPollRequest(predictionId, fileIds);
+        fetch(`${poll.url}&cancel=1`).catch(() => {});
       }
     } else {
-      aiStatus.textContent = error.message || "Inpainting failed. Showing the scale-to-fit result.";
+      showAiBanner(error.message || formatAiError({}));
+      showAiProgress("");
     }
   } finally {
     aiAbort = null;
     aiCancel.hidden = true;
     aiRun.disabled = false;
+  }
+}
+
+async function readAiBody(response) {
+  const parsed = await readAiPayload(response);
+  console.info("[AI fill] response", response.status, parsed.payload && parsed.payload.status, parsed.payload && parsed.payload.stage);
+  if (!response.ok || parsed.payload.status === "failed") {
+    const message = formatAiError({ status: parsed.payload.code || response.status, payload: parsed.payload });
+    throw Object.assign(new Error(message), { ai: true });
+  }
+  return parsed.payload;
+}
+
+async function readAiPayload(response) {
+  const text = await response.text();
+  if (!text) return { payload: {} };
+  try {
+    return { payload: JSON.parse(text) };
+  } catch {
+    return { payload: { error: text.slice(0, 280) } };
   }
 }
 
@@ -808,27 +916,6 @@ function loadDataImage(src) {
     image.onerror = () => reject(new Error("Could not read the filled image. Showing the scale-to-fit result."));
     image.src = src;
   });
-}
-
-async function inpaintRequest(method, body, signal, query = "") {
-  const response = await fetch(`/.netlify/functions/inpaint${query}`, {
-    method,
-    headers: body ? { "content-type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-    signal,
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (response.status === 401 || response.status === 402 || payload.code === 401 || payload.code === 402) {
-    const code = payload.code || response.status;
-    throw new Error(`AI fill unavailable: Replicate account error ${code}`);
-  }
-  if (!response.ok && payload.status !== "failed") {
-    throw new Error(payload.error || `Inpaint failed (${response.status}). Showing the scale-to-fit result.`);
-  }
-  if (payload.status === "failed") {
-    throw new Error(payload.error || "Inpainting failed. Showing the scale-to-fit result.");
-  }
-  return payload;
 }
 
 function delay(ms, signal) {

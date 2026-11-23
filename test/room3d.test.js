@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyHomography } from "../homography.js";
+import { applyHomography, planRectangle, rectangleTargets, solveHomography } from "../homography.js";
 import { fitRoomFrame, layoutRoom, reconstructBox } from "../room3d.js";
 
 function closeTo(actual, expected, epsilon, label) {
@@ -86,6 +86,16 @@ test("an exact cuboid keeps the back wall rectangular after the frontal layout",
   assertFrontal(layoutRoom(model), model);
 });
 
+test("the box back face matches four-point mode, and the bands are symmetric", () => {
+  const room = makeRoom(900, 1280, 800, 0.28, 0.16);
+  const model = reconstructBox(room.back, room.near, 1280, 800);
+  const rect = planRectangle(room.back);
+  const four = solveHomography(room.back, rectangleTargets(rect.width, rect.height));
+  const layout = layoutRoom(model, { backPoints: room.back, rect });
+  assertSameFrame(four, layout.faces.back.H, room.back);
+  assertBands(layout);
+});
+
 test("the fitted frame stays on the near opening", () => {
   const room = makeRoom(900, 1280, 800, 0.35, -0.2, 0.6, -0.4, 700, 360);
   const model = reconstructBox(room.back, slideAlong(room.back, room.near, 0.7), 1280, 800);
@@ -147,6 +157,7 @@ function assertFrontal(layout, model) {
   closeTo(back[2].y, back[3].y, 1e-6, "bottom horizontal");
   assert.ok(back[1].x > back[0].x);
   assert.ok(back[2].y > back[0].y);
+  assertBands(layout);
 
   const floor = layout.faces.floor.H;
   const bottomLeft = applyHomography(floor, model.wire[2].x, model.wire[2].y);
@@ -179,6 +190,45 @@ function assertFrontal(layout, model) {
       closeTo(left.x, right.x, 1e-6, `${a}/${b} seam x`);
       closeTo(left.y, right.y, 1e-6, `${a}/${b} seam y`);
     }
+  }
+}
+
+function assertBands(layout) {
+  const { back, near, center } = layout;
+  closeTo(center.x, (back[0].x + back[1].x) / 2, 1e-9, "vanishing point x");
+  closeTo(center.y, (back[0].y + back[2].y) / 2, 1e-9, "vanishing point y");
+  const ceiling = back[0].y - near[0].y;
+  const floor = near[2].y - back[2].y;
+  const left = back[0].x - near[0].x;
+  const right = near[1].x - back[1].x;
+  closeTo(ceiling, floor, 1e-6, "ceiling and floor bands");
+  closeTo(left, right, 1e-6, "left and right walls");
+  assert.ok(ceiling > 0 && left > 0);
+}
+
+function assertSameFrame(four, box, corners) {
+  const samples = corners.slice();
+  samples.push({
+    x: (corners[0].x + corners[1].x + corners[2].x + corners[3].x) / 4,
+    y: (corners[0].y + corners[1].y + corners[2].y + corners[3].y) / 4,
+  });
+  const a = samples.map((point) => applyHomography(four, point.x, point.y));
+  const b = samples.map((point) => applyHomography(box, point.x, point.y));
+  const norm = (points, index) => {
+    const minX = Math.min(...points.map((point) => point.x));
+    const minY = Math.min(...points.map((point) => point.y));
+    const maxX = Math.max(...points.map((point) => point.x));
+    const maxY = Math.max(...points.map((point) => point.y));
+    return {
+      u: (points[index].x - minX) / (maxX - minX),
+      v: (points[index].y - minY) / (maxY - minY),
+    };
+  };
+  for (let i = 0; i < samples.length; i++) {
+    const left = norm(a, i);
+    const right = norm(b, i);
+    closeTo(left.u, right.u, 1e-6, `back u ${i}`);
+    closeTo(left.v, right.v, 1e-6, `back v ${i}`);
   }
 }
 
