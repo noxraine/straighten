@@ -13,6 +13,7 @@
  */
 
 import { applyHomography, fitFrame, invert3x3, maxInscribedRect } from "./homography.js";
+import { faceAt, fitRoomFrame } from "./room3d.js";
 
 const MAX_OUTPUT_DIM = 16384;
 const MAX_OUTPUT_AREA = 64_000_000;
@@ -294,6 +295,344 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
     frame: { originX, originY, spanX, spanY, width: outW, height: outH },
   };
 }
+
+/**
+ * Piecewise frontal-room warp. Each output pixel picks one of the five face
+ * homographies. Outside the near opening, the same face continues, and samples
+ * that miss the photo stay transparent.
+ */
+export function renderRoomWarp(source, srcW, srcH, layout, model, options = {}) {
+  const run = renderChain.then(() => renderRoomInner(source, srcW, srcH, layout, model, options));
+  renderChain = run.then(() => {}, () => {});
+  return run;
+}
+
+async function renderRoomInner(source, srcW, srcH, layout, model, options) {
+  if (typeof document === "undefined") {
+    throw new Error("renderWarp needs a browser.");
+  }
+  const mode = options.mode === "crop" ? "crop" : options.mode === "max" ? "max" : "full";
+  let originX = 0;
+  let originY = 0;
+  let spanX = layout.backWidth;
+  let spanY = layout.backHeight;
+  let outW = Math.max(2, Math.round(layout.backWidth));
+  let outH = Math.max(2, Math.round(layout.backHeight));
+  let clamped = false;
+  if (mode !== "crop") {
+    const fit = fitRoomFrame(layout, model, srcW, srcH);
+    clamped = fit.clamped;
+    if (mode === "max") {
+      const rect = maxInscribedRect(fit.corners);
+      if (rect && rect.width > 1 && rect.height > 1) {
+        originX = rect.x;
+        originY = rect.y;
+        spanX = rect.width;
+        spanY = rect.height;
+        outW = Math.max(2, Math.round(spanX));
+        outH = Math.max(2, Math.round(spanY));
+      } else {
+        originX = fit.originX;
+        originY = fit.originY;
+        spanX = fit.spanX;
+        spanY = fit.spanY;
+        outW = fit.width;
+        outH = fit.height;
+      }
+    } else {
+      originX = fit.originX;
+      originY = fit.originY;
+      spanX = fit.spanX;
+      spanY = fit.spanY;
+      outW = fit.width;
+      outH = fit.height;
+    }
+  }
+
+  if (Number.isFinite(options.maxEdge) && options.maxEdge > 0) {
+    const edge = Math.max(outW, outH);
+    if (edge > options.maxEdge) {
+      const s = options.maxEdge / edge;
+      outW = Math.max(2, Math.round(outW * s));
+      outH = Math.max(2, Math.round(outH * s));
+    }
+  }
+  const fitted = fitOutputSize(outW, outH);
+  outW = fitted.width;
+  outH = fitted.height;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext("2d", { alpha: true });
+  ctx.clearRect(0, 0, outW, outH);
+
+  const mapping = { layout, originX, originY, spanX, spanY, outW, outH, srcW, srcH };
+  let renderer = "cpu";
+  let webglError = null;
+  try {
+    const drew = renderRoomWebGL(ctx, source, mapping, options);
+    if (drew) renderer = "webgl";
+  } catch (error) {
+    webglError = error;
+    ctx.clearRect(0, 0, outW, outH);
+  }
+  if (renderer !== "webgl") {
+    try {
+      await renderRoomCPU(ctx, source, mapping, options.onProgress);
+    } catch (error) {
+      const reason = webglError ? ` WebGL failed (${webglError.message}).` : "";
+      throw new Error(`Could not render the room.${reason} ${error.message}`);
+    }
+  }
+
+  return {
+    canvas,
+    width: outW,
+    height: outH,
+    capped: fitted.capped,
+    clamped,
+    renderer,
+    frame: { originX, originY, spanX, spanY, width: outW, height: outH },
+  };
+}
+
+async function renderRoomCPU(ctx, source, mapping, onProgress) {
+  const { srcW, srcH, outW, outH } = mapping;
+  const scratch = document.createElement("canvas");
+  scratch.width = srcW;
+  scratch.height = srcH;
+  const sctx = scratch.getContext("2d", { willReadFrequently: true });
+  sctx.drawImage(source, 0, 0, srcW, srcH);
+  let pixels;
+  try {
+    pixels = sctx.getImageData(0, 0, srcW, srcH).data;
+  } catch {
+    throw new Error("This photo is too large to correct without WebGL.");
+  }
+  const out = new Uint8ClampedArray(outW * outH * 4);
+  const chunk = 32;
+  for (let y = 0; y < outH; y += chunk) {
+    const y1 = Math.min(outH, y + chunk);
+    warpRoomRows(pixels, srcW, srcH, mapping, out, y, y1);
+    if (onProgress) onProgress(y1 / outH);
+    if (y1 < outH) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  ctx.putImageData(new ImageData(out, outW, outH), 0, 0);
+}
+
+function warpRoomRows(src, srcW, srcH, mapping, out, y0, y1) {
+  const { layout, originX, originY, spanX, spanY, outW, outH } = mapping;
+  const sxScale = spanX / outW;
+  const syScale = spanY / outH;
+  for (let y = y0; y < y1; y++) {
+    const destY = originY + (y + 0.5) * syScale;
+    const row = y * outW * 4;
+    for (let x = 0; x < outW; x++) {
+      const destX = originX + (x + 0.5) * sxScale;
+      const H = layout.faces[faceAt(layout, destX, destY)].Hinv;
+      const w = H[6] * destX + H[7] * destY + H[8];
+      if (Math.abs(w) < 1e-12) continue;
+      const srcX = (H[0] * destX + H[1] * destY + H[2]) / w;
+      const srcY = (H[3] * destX + H[4] * destY + H[5]) / w;
+      const color = sampleBilinear(src, srcW, srcH, srcX, srcY);
+      if (!color) continue;
+      const o = row + x * 4;
+      out[o] = color[0];
+      out[o + 1] = color[1];
+      out[o + 2] = color[2];
+      out[o + 3] = color[3];
+    }
+  }
+}
+
+function renderRoomWebGL(outCtx, source, mapping, options) {
+  const state = getGL();
+  if (!state) return false;
+  const room = ensureRoomProgram(state);
+  const { gl } = state;
+  const deviceMax = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096;
+  const budget = options.textureLimit ? Math.min(deviceMax, options.textureLimit) : deviceMax;
+  const preview = Number.isFinite(options.maxEdge);
+  const outW = mapping.outW;
+  const outH = mapping.outH;
+  const tileLimit = Math.max(32, Math.min(budget - 8, 4096));
+  state.srcFull = [mapping.srcW, mapping.srcH];
+  const wholeLimit = preview ? Math.min(budget, Math.max(1024, Math.ceil(options.maxEdge * 2))) : budget;
+  const wholeFits = mapping.srcW <= wholeLimit && mapping.srcH <= wholeLimit;
+  const useSingleTexture = preview || wholeFits;
+  if (useSingleTexture) {
+    const uploaded = downscaleSource(source, mapping.srcW, mapping.srcH, wholeLimit);
+    uploadTexture(state, uploaded);
+    state.srcOrigin = [0, 0];
+    state.srcExtent = [mapping.srcW, mapping.srcH];
+  }
+  for (let ty = 0; ty < outH; ty += tileLimit) {
+    for (let tx = 0; tx < outW; tx += tileLimit) {
+      const tw = Math.min(tileLimit, outW - tx);
+      const th = Math.min(tileLimit, outH - ty);
+      if (!useSingleTexture) {
+        const region = sourceRegionForRoomTile(mapping, tx, ty, tw, th);
+        if (!region) {
+          outCtx.clearRect(tx, ty, tw, th);
+          continue;
+        }
+        const crop = cropSource(source, region, budget);
+        uploadTexture(state, crop);
+        state.srcOrigin = [region.x, region.y];
+        state.srcExtent = [region.w, region.h];
+      }
+      drawRoomTile(state, room, tw, th, tx, ty, mapping);
+      outCtx.drawImage(state.canvas, 0, 0, tw, th, tx, ty, tw, th);
+    }
+  }
+  return true;
+}
+
+function sourceRegionForRoomTile(mapping, tx, ty, tw, th) {
+  const { layout, originX, originY, spanX, spanY, outW, outH, srcW, srcH } = mapping;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const steps = 4;
+  for (let j = 0; j <= steps; j++) {
+    for (let i = 0; i <= steps; i++) {
+      const destX = originX + ((tx + (i / steps) * tw) / outW) * spanX;
+      const destY = originY + ((ty + (j / steps) * th) / outH) * spanY;
+      const H = layout.faces[faceAt(layout, destX, destY)].Hinv;
+      const point = applyHomography(H, destX, destY);
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+  }
+  if (!Number.isFinite(minX)) return null;
+  minX = Math.floor(minX) - 2;
+  minY = Math.floor(minY) - 2;
+  maxX = Math.ceil(maxX) + 2;
+  maxY = Math.ceil(maxY) + 2;
+  if (maxX - minX > srcW * 1.5 || maxY - minY > srcH * 1.5) {
+    return { x: 0, y: 0, w: srcW, h: srcH };
+  }
+  const x0 = Math.max(0, minX);
+  const y0 = Math.max(0, minY);
+  const x1 = Math.min(srcW, maxX);
+  const y1 = Math.min(srcH, maxY);
+  if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+function ensureRoomProgram(state) {
+  if (state.room && state.room.program) return state.room;
+  const { gl } = state;
+  const program = buildProgram(gl, VERT, ROOM_FRAG);
+  const loc = {
+    pos: gl.getAttribLocation(program, "a_pos"),
+    tileOrigin: gl.getUniformLocation(program, "u_tileOrigin"),
+    tileSize: gl.getUniformLocation(program, "u_tileSize"),
+    outSize: gl.getUniformLocation(program, "u_outSize"),
+    destOrigin: gl.getUniformLocation(program, "u_destOrigin"),
+    destSpan: gl.getUniformLocation(program, "u_destSpan"),
+    srcOrigin: gl.getUniformLocation(program, "u_srcOrigin"),
+    srcExtent: gl.getUniformLocation(program, "u_srcExtent"),
+    srcFull: gl.getUniformLocation(program, "u_srcFull"),
+    center: gl.getUniformLocation(program, "u_center"),
+    half: gl.getUniformLocation(program, "u_half"),
+    tex: gl.getUniformLocation(program, "u_tex"),
+    back: gl.getUniformLocation(program, "u_back"),
+    floor: gl.getUniformLocation(program, "u_floor"),
+    ceiling: gl.getUniformLocation(program, "u_ceiling"),
+    left: gl.getUniformLocation(program, "u_left"),
+    right: gl.getUniformLocation(program, "u_right"),
+  };
+  state.room = { program, loc };
+  return state.room;
+}
+
+function drawRoomTile(state, room, tw, th, tx, ty, mapping) {
+  const { gl, canvas } = state;
+  const { loc } = room;
+  const { layout } = mapping;
+  if (canvas.width !== tw || canvas.height !== th) {
+    canvas.width = tw;
+    canvas.height = th;
+  }
+  gl.viewport(0, 0, tw, th);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(room.program);
+  gl.bindBuffer(gl.ARRAY_BUFFER, state.buffer);
+  gl.enableVertexAttribArray(loc.pos);
+  gl.vertexAttribPointer(loc.pos, 2, gl.FLOAT, false, 0, 0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state.texture);
+  gl.uniform1i(loc.tex, 0);
+  gl.uniformMatrix3fv(loc.back, false, columnMajor(layout.faces.back.Hinv));
+  gl.uniformMatrix3fv(loc.floor, false, columnMajor(layout.faces.floor.Hinv));
+  gl.uniformMatrix3fv(loc.ceiling, false, columnMajor(layout.faces.ceiling.Hinv));
+  gl.uniformMatrix3fv(loc.left, false, columnMajor(layout.faces.left.Hinv));
+  gl.uniformMatrix3fv(loc.right, false, columnMajor(layout.faces.right.Hinv));
+  gl.uniform2f(loc.center, layout.center.x, layout.center.y);
+  gl.uniform2f(loc.half, layout.halfW, layout.halfH);
+  gl.uniform2f(loc.tileOrigin, tx, ty);
+  gl.uniform2f(loc.tileSize, tw, th);
+  gl.uniform2f(loc.outSize, mapping.outW, mapping.outH);
+  gl.uniform2f(loc.destOrigin, mapping.originX, mapping.originY);
+  gl.uniform2f(loc.destSpan, mapping.spanX, mapping.spanY);
+  gl.uniform2f(loc.srcOrigin, state.srcOrigin[0], state.srcOrigin[1]);
+  gl.uniform2f(loc.srcExtent, state.srcExtent[0], state.srcExtent[1]);
+  gl.uniform2f(loc.srcFull, state.srcFull[0], state.srcFull[1]);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+const ROOM_FRAG = `
+precision highp float;
+varying vec2 v_out;
+uniform sampler2D u_tex;
+uniform mat3 u_back;
+uniform mat3 u_floor;
+uniform mat3 u_ceiling;
+uniform mat3 u_left;
+uniform mat3 u_right;
+uniform vec2 u_center;
+uniform vec2 u_half;
+uniform vec2 u_outSize;
+uniform vec2 u_destOrigin;
+uniform vec2 u_destSpan;
+uniform vec2 u_srcOrigin;
+uniform vec2 u_srcExtent;
+uniform vec2 u_srcFull;
+
+void main() {
+  vec2 dest = u_destOrigin + (v_out / u_outSize) * u_destSpan;
+  vec2 d = dest - u_center;
+  mat3 H = u_back;
+  if (abs(d.x) > u_half.x || abs(d.y) > u_half.y) {
+    float ax = abs(d.x) / u_half.x;
+    float ay = abs(d.y) / u_half.y;
+    if (ay >= ax) H = d.y >= 0.0 ? u_floor : u_ceiling;
+    else H = d.x >= 0.0 ? u_right : u_left;
+  }
+  vec3 p = H * vec3(dest, 1.0);
+  if (abs(p.z) < 1e-8) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
+  vec2 src = p.xy / p.z;
+  if (src.x < 0.0 || src.y < 0.0 || src.x >= u_srcFull.x || src.y >= u_srcFull.y) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
+  vec2 uv = (src - u_srcOrigin) / u_srcExtent;
+  uv.y = 1.0 - uv.y;
+  gl_FragColor = texture2D(u_tex, uv);
+}
+`;
 
 async function renderCPU(ctx, source, mapping, onProgress) {
   const { srcW, srcH, outW, outH } = mapping;

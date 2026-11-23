@@ -1,10 +1,11 @@
 /**
  * Rectangular room (cuboid) from 8 image points.
  * Back wall: TL, TR, BL, BR. Near corners, same order: ceiling-left, ceiling-right, floor-left, floor-right.
- * The output warp is a rotation about the camera center, H = K Rᵀ K⁻¹, so every face stays consistent.
+ * The output is a frontal layout: an axis-aligned back rectangle and a larger centered copy for the
+ * near opening. Each of the five faces is its own quad homography, so shared edges meet.
  */
 
-import { invert3x3, multiply3x3 } from "./homography.js";
+import { applyHomography, invert3x3, multiply3x3, solveHomography } from "./homography.js";
 
 export function defaultFocalLength(imageWidth, fovDegrees = 60) {
   const fov = (fovDegrees * Math.PI) / 180;
@@ -84,6 +85,227 @@ export function reconstructBox(back, near, imageWidth, imageHeight, options = {}
     wire: [...back.map((_, index) => project(corners.back[index], focal, cx, cy)),
       ...corners.near.map((point) => project(point, focal, cx, cy))],
   };
+}
+
+/**
+ * How much larger the near opening is than the back wall in the frontal layout.
+ * The base factor is the similar-triangle ratio distance / (distance - depth).
+ * A lens override scales only that extension: a wider field of view pushes the
+ * near corners out, a narrower one pulls them in. The back rectangle is unchanged.
+ */
+export function depthFactor(model, fovDegrees) {
+  const distance = Math.max(model.distance, 1e-4);
+  const depth = Math.min(Math.max(model.depth, 0), distance * 0.92);
+  const base = distance / (distance - depth);
+  if (!Number.isFinite(fovDegrees)) return base;
+  const estimated = Number.isFinite(model.fov) && model.fov > 1 ? model.fov : 60;
+  const stretch = Math.tan((fovDegrees * Math.PI) / 360) / Math.tan((estimated * Math.PI) / 360);
+  return Math.min(8, Math.max(1.04, 1 + (base - 1) * stretch));
+}
+
+const FACE_INDEX = {
+  back: [0, 1, 3, 2],
+  ceiling: [0, 1, 5, 4],
+  right: [1, 3, 7, 5],
+  floor: [2, 3, 7, 6],
+  left: [0, 2, 6, 4],
+};
+
+/**
+ * Frontal room layout in its own pixel space.
+ * The back wall is the axis-aligned rectangle [0, backWidth] × [0, backHeight],
+ * aspect width/height, centered on the target vanishing point. The four near
+ * corners sit on the rays from that point through the back corners, all at the
+ * same depth factor, so the near opening is a scaled, centered copy.
+ */
+export function layoutRoom(model, options = {}) {
+  const aspect = Math.min(20, Math.max(0.05, model.width / model.height));
+  const backHeight = 1000;
+  const backWidth = aspect * backHeight;
+  const center = { x: backWidth / 2, y: backHeight / 2 };
+  const halfW = backWidth / 2;
+  const halfH = backHeight / 2;
+  const factor = depthFactor(model, options.fovDegrees);
+  const back = [
+    { x: center.x - halfW, y: center.y - halfH },
+    { x: center.x + halfW, y: center.y - halfH },
+    { x: center.x - halfW, y: center.y + halfH },
+    { x: center.x + halfW, y: center.y + halfH },
+  ];
+  const near = back.map((point) => ({
+    x: center.x + (point.x - center.x) * factor,
+    y: center.y + (point.y - center.y) * factor,
+  }));
+  const targets = [...back, ...near];
+  const faces = {};
+  for (const name of Object.keys(FACE_INDEX)) {
+    const indices = FACE_INDEX[name];
+    const source = indices.map((index) => model.wire[index]);
+    const target = indices.map((index) => targets[index]);
+    const H = solveHomography(source, target);
+    faces[name] = { indices, source, target, H, Hinv: invert3x3(H) };
+  }
+  return {
+    back,
+    near,
+    targets,
+    faces,
+    factor,
+    center,
+    halfW,
+    halfH,
+    backWidth,
+    backHeight,
+  };
+}
+
+/** Which face owns a point in layout space, including the region beyond the near opening. */
+export function faceAt(layout, x, y) {
+  const dx = x - layout.center.x;
+  const dy = y - layout.center.y;
+  if (Math.abs(dx) <= layout.halfW && Math.abs(dy) <= layout.halfH) return "back";
+  const ax = Math.abs(dx) / layout.halfW;
+  const ay = Math.abs(dy) / layout.halfH;
+  if (ay >= ax) return dy >= 0 ? "floor" : "ceiling";
+  return dx >= 0 ? "right" : "left";
+}
+
+/** Which face's homography should carry a source pixel, extended past the near corners. */
+export function sourceFace(model, x, y) {
+  const wire = model.wire;
+  if (pointInQuad([wire[0], wire[1], wire[3], wire[2]], x, y)) return "back";
+  const vp = finiteVanishing(model.vanishing.depth, wire);
+  const point = { x, y };
+  const regions = [
+    ["ceiling", wire[0], wire[1], midpoint(wire[4], wire[5])],
+    ["right", wire[1], wire[3], midpoint(wire[5], wire[7])],
+    ["floor", wire[3], wire[2], midpoint(wire[7], wire[6])],
+    ["left", wire[2], wire[0], midpoint(wire[6], wire[4])],
+  ];
+  for (const [name, a, b, reference] of regions) {
+    if (inWedge(vp, a, b, point) && inWedge(vp, a, b, reference)) return name;
+  }
+  let best = "floor";
+  let bestDist = Infinity;
+  for (const [name, , , reference] of regions) {
+    const dist = (point.x - reference.x) ** 2 + (point.y - reference.y) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = name;
+    }
+  }
+  return best;
+}
+
+/**
+ * Bounding box of the frontal layout after the whole photo is carried by the
+ * face homographies. Corners that fall near the horizon are held in, the same
+ * way a single homography is. `corners` are the mapped source-image corners.
+ */
+export function fitRoomFrame(layout, model, srcW, srcH) {
+  // Keep the frame on the near opening. A source corner that the face
+  // homography sends toward the horizon is left out, instead of inflating
+  // the canvas until the room is a sliver.
+  const reachX = layout.halfW * layout.factor * 1.25;
+  const reachY = layout.halfH * layout.factor * 1.25;
+  const mapped = [];
+  let clamped = false;
+  const push = (point, corner, required) => {
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      clamped = true;
+      return;
+    }
+    const dx = Math.abs(point.x - layout.center.x);
+    const dy = Math.abs(point.y - layout.center.y);
+    if (!required && (dx > reachX || dy > reachY)) {
+      clamped = true;
+      return;
+    }
+    mapped.push(corner ? { ...point, corner: true } : point);
+  };
+  for (const point of layout.near) push(point, false, true);
+  const steps = 8;
+  const boundary = [
+    [0, 0, srcW, 0],
+    [srcW, 0, srcW, srcH],
+    [srcW, srcH, 0, srcH],
+    [0, srcH, 0, 0],
+  ];
+  for (const [x0, y0, x1, y1] of boundary) {
+    for (let step = 0; step < steps; step++) {
+      const t = step / steps;
+      const x = x0 + (x1 - x0) * t;
+      const y = y0 + (y1 - y0) * t;
+      const face = sourceFace(model, x, y);
+      push(applyHomography(layout.faces[face].H, x, y), step === 0, false);
+    }
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of mapped) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+  const pad = 1;
+  minX -= pad;
+  minY -= pad;
+  maxX += pad;
+  maxY += pad;
+  const spanX = Math.max(maxX - minX, 1);
+  const spanY = Math.max(maxY - minY, 1);
+  return {
+    originX: minX,
+    originY: minY,
+    spanX,
+    spanY,
+    width: Math.max(2, Math.round(spanX)),
+    height: Math.max(2, Math.round(spanY)),
+    clamped,
+    corners: mapped.filter((point) => point.corner),
+  };
+}
+
+function finiteVanishing(point, wire) {
+  if (!point || !point.atInfinity) return { x: point.x, y: point.y };
+  const origin = midpoint(wire[0], wire[3]);
+  const length = Math.hypot(point.x, point.y) || 1;
+  const scale = 1e7;
+  return {
+    x: origin.x + (point.x / length) * scale,
+    y: origin.y + (point.y / length) * scale,
+  };
+}
+
+function inWedge(origin, a, b, point) {
+  const span = cross(origin, a, b);
+  if (Math.abs(span) < 1e-8) return false;
+  return span * cross(origin, a, point) >= 0 && span * cross(origin, point, b) >= 0;
+}
+
+function cross(origin, a, b) {
+  return (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
+}
+
+function midpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function pointInQuad(quad, x, y) {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = quad[i];
+    const b = quad[(i + 1) % 4];
+    const turn = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+    if (Math.abs(turn) <= 1e-8) continue;
+    const next = turn > 0 ? 1 : -1;
+    if (sign === 0) sign = next;
+    else if (sign !== next) return false;
+  }
+  return sign !== 0;
 }
 
 export function frontalHomography(focal, cx, cy, axes) {
