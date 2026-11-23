@@ -1,9 +1,7 @@
 import {
-  applyHomography,
   blendTowardIdentity,
   fitFrame,
   maxInscribedRect,
-  multiply3x3,
   placeOnFrame,
   planRectangle,
   quadProblem,
@@ -11,10 +9,10 @@ import {
   solveHomography,
 } from "./homography.js";
 import { createPointPicker } from "./point-picker.js";
-import { reconstructBox } from "./room3d.js";
 import { adjustCanvas, buildMask, compositeOnWhite, patchAverage, whiteBalanceGains } from "./adjust.js";
 import { compositeFill, fitLongSide, maskFromAlpha } from "./netlify/functions/inpaint-logic.js";
-import { fitOutputSize, renderWarp } from "./warp.js";
+import { fitRoomFrame, layoutRoom, reconstructBox } from "./room3d.js";
+import { fitOutputSize, renderRoomWarp, renderWarp } from "./warp.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -97,7 +95,7 @@ for (const input of document.querySelectorAll('input[name="pick"]')) {
     const on = $("pick-room").checked;
     $("box-panel").hidden = !on;
     $("preview-hint").textContent = on
-      ? "Eight clicks: the back wall, then the four near corners. The result is one rotation that faces the back wall."
+      ? "Eight clicks: the back wall, then the four near corners. The back wall comes out as a rectangle, and the floor runs straight toward you."
       : "Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.";
     picker.setRoomMode(on);
   });
@@ -272,6 +270,21 @@ async function runPreviewLoop() {
   }
 }
 
+function renderPlan(plan, extra) {
+  if (plan.layout) {
+    return renderRoomWarp(photo.bitmap, photo.width, photo.height, plan.layout, plan.model, {
+      mode: warpMode(),
+      ...extra,
+    });
+  }
+  return renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
+    mode: warpMode(),
+    destWidth: plan.rect.width,
+    destHeight: plan.rect.height,
+    ...extra,
+  });
+}
+
 async function renderPreview(fast) {
   const plan = currentPlan();
   if (!plan) {
@@ -284,12 +297,7 @@ async function renderPreview(fast) {
   const longest = Math.max(frame.width, frame.height, 320) * dpr;
   const maxEdge = fast ? Math.min(900, longest) : Math.min(1800, Math.max(640, longest));
   try {
-    let result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
-      mode: warpMode(),
-      destWidth: plan.rect.width,
-      destHeight: plan.rect.height,
-      maxEdge,
-    });
+    let result = await renderPlan(plan, { maxEdge });
     if (previewDirty) return;
     showPreview(result, plan);
     const full = exportSize(plan);
@@ -331,8 +339,8 @@ function showPreview(result, plan) {
   const ctx = previewCanvas.getContext("2d");
   ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
   ctx.drawImage(adjusted, 0, 0);
-  if (plan && plan.model && $("wireframe").checked) {
-    drawBoxWire(ctx, result.frame, plan.model, plan.H, adjusted.width, adjusted.height);
+  if (plan && plan.layout && $("wireframe").checked) {
+    drawBoxWire(ctx, result.frame, plan.layout.targets, adjusted.width, adjusted.height);
   }
   picker.setGuide(plan && plan.model ? plan.model.wire : null);
 }
@@ -354,12 +362,11 @@ function warpKey() {
   return `${photo.width}x${photo.height}|${strength.value}|${points}|${near}|${fov}|${$("pick-room").checked ? "box" : "wall"}`;
 }
 
-function drawBoxWire(ctx, frame, model, H, width, height) {
+function drawBoxWire(ctx, frame, points, width, height) {
   const scaleX = width / frame.width;
   const scaleY = height / frame.height;
-  const placed = model.wire.map((point) => {
-    const mapped = applyHomography(H, point.x, point.y);
-    const onFrame = placeOnFrame(frame, mapped.x, mapped.y);
+  const placed = points.map((point) => {
+    const onFrame = placeOnFrame(frame, point.x, point.y);
     return { x: onFrame.x * scaleX, y: onFrame.y * scaleY };
   });
   const edges = [
@@ -401,14 +408,10 @@ function currentPlan() {
   }
   if (boxReady()) {
     try {
-      const model = reconstructBox(latest.points, latest.near, photo.width, photo.height, fovOverride());
-      let H = blendTowardIdentity(model.H, Number(strength.value) / 100);
-      if (frameMode() === "crop") {
-        const projected = latest.points.map((point) => applyHomography(H, point.x, point.y));
-        H = multiply3x3(solveHomography(projected, rectangleTargets(rect.width, rect.height)), H);
-      }
+      const model = reconstructBox(latest.points, latest.near, photo.width, photo.height);
+      const layout = layoutRoom(model, fovOverride());
       updateLensNote(model);
-      return { rect, H, model };
+      return { rect, H: layout.faces.back.H, model, layout };
     } catch (error) {
       setStatus(error.message || "Could not reconstruct the box.", true);
       return null;
@@ -436,11 +439,11 @@ function fovOverride() {
 function updateLensNote(model) {
   const override = Boolean($("fov").dataset.touched);
   if (!override && model.degenerate) {
-    $("lens-note").textContent = "The walls are nearly parallel, so the lens fell back to 60°. Move the slider if the room looks too wide or too tight.";
+    $("lens-note").textContent = "The walls are nearly parallel, so depth starts from a 60° lens. The slider only stretches the floor and sides. The back wall stays a rectangle.";
   } else if (override) {
-    $("lens-note").textContent = `Lens override ${$("fov").value}°. Use estimate to go back to the vanishing-point focal length.`;
+    $("lens-note").textContent = `Depth uses ${$("fov").value}° instead of the estimated ${Math.round(model.fov)}°. The back wall stays a rectangle.`;
   } else {
-    $("lens-note").textContent = `Estimated lens ${Math.round(model.fov)}°. Move the slider to override it.`;
+    $("lens-note").textContent = `Estimated ${Math.round(model.fov)}° lens. Move the slider to lengthen or shorten the floor. The back wall stays a rectangle.`;
   }
 }
 
@@ -477,13 +480,11 @@ function refreshReadouts() {
     proportionNote.textContent = `Back wall ${formatRatio(rect.estimated)}. Add the four near corners to recover the box.`;
   } else if (boxReady()) {
     try {
-      const model = reconstructBox(latest.points, latest.near, photo.width, photo.height, fovOverride());
+      const model = reconstructBox(latest.points, latest.near, photo.width, photo.height);
       const ratio = formatRatio(model.width / model.height);
       const depth = (model.depth / model.height).toFixed(2);
       aspectReadout.textContent = ratio;
-      proportionNote.textContent = rect.measured
-        ? `Box ${ratio}, depth ${depth} × the height. Crop uses the size you entered.`
-        : `Box ${ratio}, depth ${depth} × the height.`;
+      proportionNote.textContent = `Box ${ratio}, depth ${depth} × the height.`;
     } catch {
       proportionNote.textContent = "Could not recover the box from these corners.";
     }
@@ -517,6 +518,15 @@ function refreshReadouts() {
 function exportSize(plan) {
   if (!photo || !plan) return null;
   const mode = frameMode();
+  if (plan.layout) {
+    if (mode === "crop") return fitOutputSize(plan.layout.backWidth, plan.layout.backHeight);
+    const fit = fitRoomFrame(plan.layout, plan.model, photo.width, photo.height);
+    if (mode === "max") {
+      const rect = maxInscribedRect(fit.corners);
+      if (rect) return fitOutputSize(Math.round(rect.width), Math.round(rect.height));
+    }
+    return fitOutputSize(fit.width, fit.height);
+  }
   if (mode === "crop") return fitOutputSize(plan.rect.width, plan.rect.height);
   const fit = fitFrame(plan.H, photo.width, photo.height);
   if (mode === "max") {
@@ -544,10 +554,7 @@ async function download() {
   setStatus("Rendering full resolution…");
   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   try {
-    let result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
-      mode: warpMode(),
-      destWidth: plan.rect.width,
-      destHeight: plan.rect.height,
+    let result = await renderPlan(plan, {
       onProgress: (amount) => {
         downloadButton.textContent = `Rendering ${Math.round(amount * 100)}%`;
       },
@@ -586,11 +593,7 @@ async function downloadZip() {
   setStatus("Rendering full resolution…");
   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   try {
-    let result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
-      mode: warpMode(),
-      destWidth: plan.rect.width,
-      destHeight: plan.rect.height,
-    });
+    let result = await renderPlan(plan, {});
     const output = presentCanvas(displaySource() || result.canvas);
     const pixels = output.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, output.width, output.height);
     const packed = buildMask(pixels.data, output.width, output.height);
