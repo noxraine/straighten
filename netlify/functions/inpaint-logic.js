@@ -1,7 +1,7 @@
 /** Pure helpers for the Replicate LaMa inpaint function and the browser composite. */
 
-export const LAMA_OWNER_MODEL = "twn39/lama";
-export const LAMA_VERSION = "bb9dd3362d559d0953b1d57ec9817f222c162e90047039b1b4af45c47b0b9af9";
+export const LAMA_OWNER_MODEL = "allenhooo/lama";
+export const LAMA_VERSION = "cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72";
 export const LAMA_IMAGE_FIELD = "image";
 export const LAMA_MASK_FIELD = "mask";
 
