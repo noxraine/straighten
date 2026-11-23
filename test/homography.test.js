@@ -6,6 +6,7 @@ import {
   blendTowardIdentity,
   fitFrame,
   invert3x3,
+  maxInscribedRect,
   measureQuad,
   multiply3x3,
   placeOnFrame,
@@ -262,6 +263,42 @@ test("correction strength blends the homography toward identity", () => {
   const fullShift = Math.hypot(full.x - quad[1].x, full.y - quad[1].y);
   const easedShift = Math.hypot(eased.x - quad[1].x, eased.y - quad[1].y);
   assert.ok(easedShift < fullShift, `eased ${easedShift} full ${fullShift}`);
+});
+
+test("max inscribed rectangle fills an axis-aligned quad and a diamond", () => {
+  const square = maxInscribedRect([
+    { x: 0, y: 0 },
+    { x: 4, y: 0 },
+    { x: 4, y: 2 },
+    { x: 0, y: 2 },
+  ]);
+  closeTo(square.x, 0, 0.05, "square x");
+  closeTo(square.y, 0, 0.05, "square y");
+  closeTo(square.width, 4, 0.08, "square w");
+  closeTo(square.height, 2, 0.08, "square h");
+  closeTo(square.area, 8, 0.2, "square area");
+
+  const diamond = maxInscribedRect([
+    { x: 0, y: -1 },
+    { x: 1, y: 0 },
+    { x: 0, y: 1 },
+    { x: -1, y: 0 },
+  ]);
+  closeTo(diamond.area, 1, 0.08, "diamond area");
+  closeTo(diamond.width, 1, 0.08, "diamond w");
+  closeTo(diamond.height, 1, 0.08, "diamond h");
+  closeTo(diamond.x, -0.5, 0.08, "diamond x");
+  closeTo(diamond.y, -0.5, 0.08, "diamond y");
+
+  const triangle = maxInscribedRect([
+    { x: 0, y: 0 },
+    { x: 2, y: 0 },
+    { x: 1, y: 2 },
+  ]);
+  closeTo(triangle.area, 1, 0.08, "triangle area");
+  closeTo(triangle.width, 1, 0.1, "triangle w");
+  closeTo(triangle.height, 1, 0.1, "triangle h");
+  assert.ok(triangle.y >= -0.02 && triangle.y < 0.15);
 });
 
 function assertCornersInside(H, srcW, srcH, fit) {

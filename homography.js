@@ -228,6 +228,115 @@ export function fitFrame(H, srcW, srcH, options = {}) {
   };
 }
 
+/**
+ * Largest axis-aligned rectangle inside a convex polygon.
+ * The search runs on the boundary, not on pixels: for a convex shape the
+ * tightest left and right edges of any horizontal span are at its endpoints.
+ * Returns { x, y, width, height, area } in the same coordinate space, or null.
+ */
+export function maxInscribedRect(points) {
+  const poly = convexOrder(points);
+  if (poly.length < 3) return null;
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (const point of poly) {
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+    yMin = Math.min(yMin, point.y);
+    yMax = Math.max(yMax, point.y);
+  }
+  const span = yMax - yMin;
+  if (!(span > 1e-8)) return null;
+
+  const measure = (y0, y1) => {
+    if (y1 < y0) {
+      const swap = y0;
+      y0 = y1;
+      y1 = swap;
+    }
+    if (y1 - y0 < span * 1e-5) return null;
+    const top = spanAt(poly, y0);
+    const bottom = spanAt(poly, y1);
+    if (!top || !bottom) return null;
+    const left = Math.max(top.left, bottom.left);
+    const right = Math.min(top.right, bottom.right);
+    const width = right - left;
+    const height = y1 - y0;
+    if (width <= 1e-8) return null;
+    return { x: left, y: y0, width, height, area: width * height };
+  };
+
+  const steps = 36;
+  let best = null;
+  for (let i = 0; i <= steps; i++) {
+    for (let j = i + 1; j <= steps; j++) {
+      const rect = measure(yMin + (span * i) / steps, yMin + (span * j) / steps);
+      if (rect && (!best || rect.area > best.area)) best = rect;
+    }
+  }
+  if (!best) return null;
+
+  let y0 = best.y;
+  let y1 = best.y + best.height;
+  let step = span / steps;
+  for (let iter = 0; iter < 14; iter++) {
+    step *= 0.5;
+    for (const dy0 of [-step, 0, step]) {
+      for (const dy1 of [-step, 0, step]) {
+        const ny0 = Math.min(yMax, Math.max(yMin, y0 + dy0));
+        const ny1 = Math.min(yMax, Math.max(yMin, y1 + dy1));
+        const rect = measure(ny0, ny1);
+        if (rect && rect.area > best.area + 1e-9) {
+          best = rect;
+          y0 = rect.y;
+          y1 = rect.y + rect.height;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function convexOrder(points) {
+  const finite = [];
+  for (const point of points) {
+    if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) finite.push(point);
+  }
+  if (finite.length < 3) return finite;
+  let cx = 0;
+  let cy = 0;
+  for (const point of finite) {
+    cx += point.x;
+    cy += point.y;
+  }
+  cx /= finite.length;
+  cy /= finite.length;
+  return finite.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+}
+
+function spanAt(poly, y) {
+  const xs = [];
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % n];
+    const dy = b.y - a.y;
+    if (Math.abs(dy) < 1e-12) {
+      if (Math.abs(a.y - y) <= 1e-8) xs.push(a.x, b.x);
+      continue;
+    }
+    const t = (y - a.y) / dy;
+    if (t >= -1e-8 && t <= 1 + 1e-8) xs.push(a.x + t * (b.x - a.x));
+  }
+  if (xs.length < 2) return null;
+  let left = Infinity;
+  let right = -Infinity;
+  for (const x of xs) {
+    left = Math.min(left, x);
+    right = Math.max(right, x);
+  }
+  return { left, right };
+}
+
 /** Where a destination-space point lands on the fitted canvas. */
 export function placeOnFrame(fit, x, y) {
   return {

@@ -12,7 +12,7 @@
  * since the on-screen result is small.
  */
 
-import { applyHomography, fitFrame, invert3x3 } from "./homography.js";
+import { applyHomography, fitFrame, invert3x3, maxInscribedRect } from "./homography.js";
 
 const MAX_OUTPUT_DIM = 16384;
 const MAX_OUTPUT_AREA = 64_000_000;
@@ -192,7 +192,7 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
   if (typeof document === "undefined") {
     throw new Error("renderWarp needs a browser.");
   }
-  const mode = options.mode === "full" ? "full" : "crop";
+  const mode = options.mode === "crop" ? "crop" : options.mode === "max" ? "max" : "full";
   const destWidth = options.destWidth;
   const destHeight = options.destHeight;
   const Hinv = invert3x3(H);
@@ -204,15 +204,34 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
   let outW = Math.max(2, Math.round(destWidth));
   let outH = Math.max(2, Math.round(destHeight));
   let clamped = false;
-  if (mode === "full") {
+  if (mode === "full" || mode === "max") {
     const fit = fitFrame(H, srcW, srcH);
-    originX = fit.originX;
-    originY = fit.originY;
-    spanX = fit.spanX;
-    spanY = fit.spanY;
-    outW = fit.width;
-    outH = fit.height;
     clamped = fit.clamped;
+    if (mode === "max") {
+      const rect = maxInscribedRect(fit.corners);
+      if (rect && rect.width > 1 && rect.height > 1) {
+        originX = rect.x;
+        originY = rect.y;
+        spanX = rect.width;
+        spanY = rect.height;
+        outW = Math.max(2, Math.round(spanX));
+        outH = Math.max(2, Math.round(spanY));
+      } else {
+        originX = fit.originX;
+        originY = fit.originY;
+        spanX = fit.spanX;
+        spanY = fit.spanY;
+        outW = fit.width;
+        outH = fit.height;
+      }
+    } else {
+      originX = fit.originX;
+      originY = fit.originY;
+      spanX = fit.spanX;
+      spanY = fit.spanY;
+      outW = fit.width;
+      outH = fit.height;
+    }
   }
 
   if (Number.isFinite(options.maxEdge) && options.maxEdge > 0) {
