@@ -1,6 +1,8 @@
 /**
- * Four-corner picker. Click order is fixed:
+ * Corner picker. Classic mode takes four corners in fixed order:
  * top-left, top-right, bottom-left, bottom-right.
+ * Box mode adds the four near corners of the room, and those clicks
+ * may land slightly outside the photo on the padded canvas.
  * Corners stay draggable. A loupe follows the pointer while aiming or dragging.
  */
 
@@ -12,23 +14,24 @@ const PROMPTS = [
   "Drag any corner to adjust",
 ];
 
+const BACK_PROMPTS = [
+  "Back wall: click the top-left corner",
+  "Back wall: click the top-right corner",
+  "Back wall: click the bottom-left corner",
+  "Back wall: click the bottom-right corner",
+];
+
+const NEAR_PROMPTS = [
+  "Near ceiling, left — where the left wall meets the ceiling at the front of the room",
+  "Near ceiling, right — where the right wall meets the ceiling",
+  "Near floor, left — where the left wall meets the floor",
+  "Near floor, right — where the right wall meets the floor",
+  "Drag any corner. A click on a depth edge is enough; it snaps to the corner.",
+];
+
 const POINT_COLORS = ["#9c3d2e", "#234838", "#3a5274", "#8a5a28"];
-const FLOOR_COLORS = ["#1d4e63", "#2a6f8f", "#3d8ea8", "#67b0c4"];
-const SIDE_COLORS = ["#4e3560", "#6b4c7a", "#8d6a9a", "#b794c4"];
-const FLOOR_PROMPTS = [
-  "Step 2/3: click the near-left floor corner",
-  "Step 2/3: click the near-right floor corner",
-  "Step 2/3: click the far-left floor corner, on the wall",
-  "Step 2/3: click the far-right floor corner, on the wall",
-  "Drag a floor corner to adjust",
-];
-const SIDE_PROMPTS = [
-  "Step 3/3: click the side wall's outer top corner",
-  "Step 3/3: click the side wall's outer bottom corner",
-  "Step 3/3: click the shared top corner, or use these two points",
-  "Step 3/3: click the shared bottom corner",
-  "Drag a side-wall corner to adjust",
-];
+const NEAR_COLORS = ["#1d4e63", "#2a6f8f", "#3d8ea8", "#67b0c4"];
+const PAD = 0.18;
 
 export function createPointPicker(canvas, { loupe, onChange }) {
   const loupeCanvas = loupe.querySelector("canvas");
@@ -38,10 +41,9 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   let image = null;
   let fit = null;
   let points = [];
-  let floorPoints = [];
-  let sidePoints = [];
+  let nearPoints = [];
+  let guide = null;
   let roomMode = false;
-  let roomStep = 0;
   let undoStack = [];
   let dragIndex = -1;
   let dragList = null;
@@ -63,9 +65,8 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   function setImage(bitmap, width, height) {
     image = { bitmap, width, height };
     points = [];
-    floorPoints = [];
-    sidePoints = [];
-    roomStep = 0;
+    nearPoints = [];
+    guide = null;
     undoStack = [];
     dragIndex = -1;
     dragList = null;
@@ -78,21 +79,19 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     if (dragIndex >= 0 || undoStack.length === 0) return false;
     const previous = undoStack.pop();
     points = previous.points;
-    floorPoints = previous.floor;
-    sidePoints = previous.side;
-    roomStep = previous.step;
+    nearPoints = previous.near;
+    guide = null;
     draw();
     emit(false);
     return true;
   }
 
   function reset() {
-    if (points.length === 0 && floorPoints.length === 0 && sidePoints.length === 0 && undoStack.length === 0) return;
+    if (points.length === 0 && nearPoints.length === 0 && undoStack.length === 0) return;
     snapshot();
     points = [];
-    floorPoints = [];
-    sidePoints = [];
-    roomStep = 0;
+    nearPoints = [];
+    guide = null;
     dragIndex = -1;
     dragList = null;
     placing = false;
@@ -103,9 +102,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   function snapshot() {
     undoStack.push({
       points: points.map((p) => ({ x: p.x, y: p.y })),
-      floor: floorPoints.map((p) => ({ x: p.x, y: p.y })),
-      side: sidePoints.map((p) => ({ x: p.x, y: p.y })),
-      step: roomStep,
+      near: nearPoints.map((p) => ({ x: p.x, y: p.y })),
     });
     if (undoStack.length > 40) undoStack.shift();
   }
@@ -113,40 +110,16 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   function setRoomMode(on) {
     roomMode = Boolean(on);
     if (!roomMode) {
-      floorPoints = [];
-      sidePoints = [];
-      roomStep = 0;
-    } else if (points.length >= 4 && roomStep === 0) {
-      roomStep = 1;
+      nearPoints = [];
+      guide = null;
     }
     draw();
     emit(false);
   }
 
-  function skipFloor() {
-    if (!roomMode) return;
-    snapshot();
-    floorPoints = [];
-    roomStep = 2;
+  function setGuide(next) {
+    guide = next && next.length === 8 ? next.map((point) => ({ x: point.x, y: point.y })) : null;
     draw();
-    emit(false);
-  }
-
-  function skipSide() {
-    if (!roomMode) return;
-    snapshot();
-    sidePoints = [];
-    roomStep = 3;
-    draw();
-    emit(false);
-  }
-
-  function acceptSide() {
-    if (!roomMode || sidePoints.length < 2) return;
-    snapshot();
-    roomStep = 3;
-    draw();
-    emit(false);
   }
 
   function emit(dragging) {
@@ -154,20 +127,16 @@ export function createPointPicker(canvas, { loupe, onChange }) {
       points: points.map((p) => ({ x: p.x, y: p.y })),
       dragging,
       canUndo: undoStack.length > 0,
-      floor: floorPoints.map((p) => ({ x: p.x, y: p.y })),
-      side: sidePoints.map((p) => ({ x: p.x, y: p.y })),
+      near: nearPoints.map((p) => ({ x: p.x, y: p.y })),
       roomMode,
-      roomStep,
       prompt: roomPrompt(),
     });
   }
 
   function roomPrompt() {
     if (!roomMode) return PROMPTS[Math.min(points.length, PROMPTS.length - 1)];
-    if (roomStep <= 0) return points.length < 4 ? PROMPTS[points.length] : "Step 1/3 complete. The floor is next.";
-    if (roomStep === 1) return FLOOR_PROMPTS[Math.min(floorPoints.length, FLOOR_PROMPTS.length - 1)];
-    if (roomStep === 2) return SIDE_PROMPTS[Math.min(sidePoints.length, SIDE_PROMPTS.length - 1)];
-    return "Drag any corner to adjust";
+    if (points.length < 4) return BACK_PROMPTS[points.length];
+    return NEAR_PROMPTS[Math.min(nearPoints.length, NEAR_PROMPTS.length - 1)];
   }
 
   function draw() {
@@ -187,15 +156,28 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(image.bitmap, fit.x, fit.y, fit.w, fit.h);
+    if (roomMode) {
+      ctx.strokeStyle = "rgba(28, 25, 20, 0.28)";
+      ctx.lineWidth = dpr;
+      ctx.strokeRect(fit.x, fit.y, fit.w, fit.h);
+    }
 
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
+    if (guide) {
+      strokeGroup(guide, [
+        [0, 1], [1, 3], [3, 2], [2, 0],
+        [4, 5], [5, 7], [7, 6], [6, 4],
+        [0, 4], [1, 5], [2, 6], [3, 7],
+      ], "#a15c12", dpr);
+    }
     strokeGroup(points, [[0, 1], [1, 3], [3, 2], [2, 0]], "#1c1914", dpr);
-    strokeGroup(floorPoints, [[0, 1], [1, 3], [3, 2], [2, 0]], "#1d4e63", dpr);
-    strokeGroup(sidePoints, [[0, 1], [0, 2], [1, 3], [2, 3]], "#4e3560", dpr);
+    strokeGroup(nearPoints, [[0, 1], [2, 3]], "#1d4e63", dpr);
+    for (let i = 0; i < nearPoints.length && i < points.length; i++) {
+      strokeGroup([points[i], nearPoints[i]], [[0, 1]], "#1d4e63", dpr);
+    }
     drawDots(points, POINT_COLORS, dpr);
-    drawDots(floorPoints, FLOOR_COLORS, dpr);
-    drawDots(sidePoints, SIDE_COLORS, dpr);
+    drawDots(nearPoints, NEAR_COLORS, dpr);
   }
 
   function strokeGroup(group, edges, color, dpr) {
@@ -235,7 +217,8 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   }
 
   function contain(cw, ch, iw, ih) {
-    const scale = Math.min(cw / iw, ch / ih);
+    const pad = roomMode ? PAD : 0;
+    const scale = Math.min(cw / (iw * (1 + 2 * pad)), ch / (ih * (1 + 2 * pad)));
     const w = iw * scale;
     const h = ih * scale;
     return { x: (cw - w) / 2, y: (ch - h) / 2, w, h, scale };
@@ -253,13 +236,24 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     const cy = (event.clientY - rect.top) * (canvas.height / rect.height);
     let x = (cx - fit.x) / fit.scale;
     let y = (cy - fit.y) / fit.scale;
-    const outside = x < 0 || y < 0 || x > image.width || y > image.height;
+    const box = clickLimits();
+    const outside = x < box.minX || y < box.minY || x > box.maxX || y > box.maxY;
     if (outside && !clampToPhoto) return null;
     if (clampToPhoto) {
-      x = Math.min(image.width, Math.max(0, x));
-      y = Math.min(image.height, Math.max(0, y));
+      x = Math.min(box.maxX, Math.max(box.minX, x));
+      y = Math.min(box.maxY, Math.max(box.minY, y));
     }
     return { x, y };
+  }
+
+  function clickLimits() {
+    if (!roomMode) return { minX: 0, minY: 0, maxX: image.width, maxY: image.height };
+    return {
+      minX: -image.width * PAD,
+      minY: -image.height * PAD,
+      maxX: image.width * (1 + PAD),
+      maxY: image.height * (1 + PAD),
+    };
   }
 
   function hitTest(imgPt, pointerType) {
@@ -269,7 +263,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     const slop = (pointerType === "touch" ? 32 : 16) / screenPerImage;
     let best = null;
     let bestDist = slop;
-    for (const list of [points, floorPoints, sidePoints]) {
+    for (const list of [points, nearPoints]) {
       for (let i = 0; i < list.length; i++) {
         const dist = Math.hypot(list[i].x - imgPt.x, list[i].y - imgPt.y);
         if (dist <= bestDist) {
@@ -282,26 +276,13 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   }
 
   function canPlace() {
-    if (!roomMode) return points.length < 4;
-    if (roomStep <= 0) return points.length < 4;
-    if (roomStep === 1) return floorPoints.length < 4;
-    if (roomStep === 2) return sidePoints.length < 4;
-    return false;
+    if (points.length < 4) return true;
+    return roomMode && nearPoints.length < 4;
   }
 
   function placePoint(imgPt) {
-    if (!roomMode || roomStep <= 0) {
-      points.push(imgPt);
-      if (roomMode && points.length === 4) roomStep = 1;
-      return;
-    }
-    if (roomStep === 1) {
-      floorPoints.push(imgPt);
-      if (floorPoints.length === 4) roomStep = 2;
-      return;
-    }
-    sidePoints.push(imgPt);
-    if (sidePoints.length === 4) roomStep = 3;
+    if (points.length < 4) points.push(imgPt);
+    else nearPoints.push(imgPt);
   }
 
   function onPointerDown(event) {
@@ -436,9 +417,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     undo,
     reset,
     setRoomMode,
-    skipFloor,
-    skipSide,
-    acceptSide,
+    setGuide,
     redraw: draw,
     hideLoupe,
   };
