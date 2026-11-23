@@ -288,6 +288,19 @@ h1 {
 
 .choice.stack { grid-template-columns: 1fr; }
 
+.consent {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 0.86rem;
+  color: var(--muted);
+  margin: 10px 0;
+}
+
+.consent input { margin-top: 3px; }
+
+#ai-status:empty { display: none; }
+
 .choice label {
   position: relative;
   border: 1px solid var(--line);

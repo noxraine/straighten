@@ -37,6 +37,10 @@ Regenerate the built-in sample wall with:
 node scripts/make-sample.mjs
 ```
 
+## AI fill
+
+AI fill is optional. It uses the whole-frame result, then sends that image and a mask to [Replicate LaMa](https://replicate.com/twn39/lama) (`twn39/lama`, version `bb9dd3362d559d0953b1d57ec9817f222c162e90047039b1b4af45c47b0b9af9`, inputs `image` and `mask`) through the Netlify function `netlify/functions/inpaint.js`. Set `REPLICATE_API_TOKEN` in the site’s environment. The browser asks for consent before the first call. Replicate keeps an uploaded file for about a day and a prediction output for a limited time; the function deletes the uploaded inputs when the run finishes or is cancelled. If the request fails or times out, the preview stays on the scale-to-fit result.
+
 ## Deploy on Netlify
 
 The site is the repository itself: `index.html`, the ES modules, `styles.css`, and `samples/`.

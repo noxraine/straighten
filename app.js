@@ -8,7 +8,8 @@ import {
   solveHomography,
 } from "./homography.js";
 import { createPointPicker } from "./point-picker.js";
-import { adjustCanvas, buildMask, patchAverage, whiteBalanceGains } from "./adjust.js";
+import { adjustCanvas, buildMask, compositeOnWhite, patchAverage, whiteBalanceGains } from "./adjust.js";
+import { compositeFill, fitLongSide, maskFromAlpha } from "./netlify/functions/inpaint-logic.js";
 import { fitOutputSize, renderWarp } from "./warp.js";
 
 const $ = (id) => document.getElementById(id);
@@ -45,6 +46,11 @@ const whiteBalanceReset = $("white-balance-reset");
 const whiteBalanceNote = $("white-balance-note");
 const clarity = $("clarity");
 const clarityValue = $("clarity-value");
+const aiPanel = $("ai-panel");
+const aiConsent = $("ai-consent");
+const aiRun = $("ai-run");
+const aiCancel = $("ai-cancel");
+const aiStatus = $("ai-status");
 const roomButton = $("room-button");
 const statusEl = $("status");
 const veil = $("veil");
@@ -65,6 +71,9 @@ let latest = { points: [], dragging: false, canUndo: false, prompt: "" };
 let gains = [1, 1, 1];
 let pickWhite = false;
 let lastWarp = null;
+let aiCanvas = null;
+let aiKey = "";
+let aiAbort = null;
 let previewDirty = false;
 let previewRunning = false;
 
@@ -98,6 +107,13 @@ whiteBalanceButton.addEventListener("click", () => {
     ? "Click a neutral point on the corrected photo."
     : "Click a point on the result that should be neutral.";
 });
+aiConsent.addEventListener("change", () => {
+  aiRun.disabled = !aiConsent.checked || Boolean(aiAbort);
+});
+aiRun.addEventListener("click", () => runAiFill());
+aiCancel.addEventListener("click", () => {
+  if (aiAbort) aiAbort.abort();
+});
 whiteBalanceReset.addEventListener("click", () => {
   gains = [1, 1, 1];
   pickWhite = false;
@@ -110,8 +126,9 @@ previewCanvas.addEventListener("click", (event) => {
   if (!pickWhite || !lastWarp) return;
   const point = eventToCanvasPixel(previewCanvas, event);
   if (!point) return;
-  const pixels = lastWarp.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, lastWarp.width, lastWarp.height);
-  const average = patchAverage(pixels.data, lastWarp.width, lastWarp.height, point.x, point.y, 3);
+  const sample = displaySource() || lastWarp;
+  const pixels = sample.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, sample.width, sample.height);
+  const average = patchAverage(pixels.data, sample.width, sample.height, point.x, point.y, 3);
   gains = whiteBalanceGains(average);
   pickWhite = false;
   whiteBalanceButton.classList.remove("is-on");
@@ -124,6 +141,8 @@ for (const input of document.querySelectorAll('input[name="frame"], input[name="
     qualityRow.hidden = !jpegSelected();
     downloadButton.textContent = jpegSelected() ? "Download JPEG" : "Download PNG";
     frameNote.textContent = frameNoteText();
+    aiPanel.hidden = frameMode() !== "ai";
+    if (frameMode() !== "ai") aiCanvas = null;
     schedulePreview(false);
   });
 }
@@ -244,7 +263,7 @@ async function renderPreview(fast) {
   const maxEdge = fast ? Math.min(900, longest) : Math.min(1800, Math.max(640, longest));
   try {
     const result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
-      mode: frameMode(),
+      mode: warpMode(),
       destWidth: plan.rect.width,
       destHeight: plan.rect.height,
       maxEdge,
@@ -282,7 +301,8 @@ function showPreview(result) {
   previewEmpty.hidden = true;
   previewCanvas.hidden = false;
   lastWarp = result.canvas;
-  const adjusted = presentCanvas(result.canvas);
+  if (aiKey !== warpKey()) aiCanvas = null;
+  const adjusted = presentCanvas(displaySource());
   previewCanvas.width = adjusted.width;
   previewCanvas.height = adjusted.height;
   const ctx = previewCanvas.getContext("2d");
@@ -292,6 +312,17 @@ function showPreview(result) {
 
 function presentCanvas(canvas) {
   return adjustCanvas(canvas, { gains, clarity: Number(clarity.value) });
+}
+
+function displaySource() {
+  if (frameMode() === "ai" && aiCanvas && aiKey === warpKey()) return aiCanvas;
+  return lastWarp;
+}
+
+function warpKey() {
+  if (!photo) return "";
+  const points = latest.points.map((point) => `${Math.round(point.x)},${Math.round(point.y)}`).join(";");
+  return `${photo.width}x${photo.height}|${strength.value}|${points}`;
 }
 
 function currentPlan() {
@@ -381,6 +412,7 @@ function frameNoteText() {
   const mode = frameMode();
   if (mode === "max") return "Largest straight rectangle that sits fully inside the straightened photo, with no empty corners.";
   if (mode === "crop") return "Exports only the surface you marked.";
+  if (mode === "ai") return "Uses the whole-frame view, then fills the empty corners with LaMa. Until you run it, the preview is the scale-to-fit result.";
   return "Scales the whole straightened photo so every edge stays inside the frame. Empty corners stay transparent in PNG and white in JPEG.";
 }
 
@@ -395,7 +427,7 @@ async function download() {
   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   try {
     const result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
-      mode: frameMode(),
+      mode: warpMode(),
       destWidth: plan.rect.width,
       destHeight: plan.rect.height,
       onProgress: (amount) => {
@@ -403,7 +435,7 @@ async function download() {
       },
     });
     const jpeg = jpegSelected();
-    const output = presentCanvas(result.canvas);
+    const output = presentCanvas(displaySource() || result.canvas);
     const blob = await canvasToBlob(output, jpeg ? "image/jpeg" : "image/png", Number(quality.value) / 100);
     if (!blob) throw new Error("The browser could not encode the file.");
     const extension = jpeg ? "jpg" : "png";
@@ -437,11 +469,11 @@ async function downloadZip() {
   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   try {
     const result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
-      mode: frameMode(),
+      mode: warpMode(),
       destWidth: plan.rect.width,
       destHeight: plan.rect.height,
     });
-    const output = presentCanvas(result.canvas);
+    const output = presentCanvas(displaySource() || result.canvas);
     const pixels = output.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, output.width, output.height);
     const packed = buildMask(pixels.data, output.width, output.height);
     const zip = new window.JSZip();
@@ -521,8 +553,163 @@ function eventToCanvasPixel(canvas, event) {
   return { x: Math.round(x), y: Math.round(y) };
 }
 
+async function runAiFill() {
+  if (!aiConsent.checked) return;
+  if (!lastWarp) {
+    aiStatus.textContent = "Place the four corners first.";
+    return;
+  }
+  const controller = new AbortController();
+  aiAbort = controller;
+  aiRun.disabled = true;
+  aiCancel.hidden = false;
+  let predictionId = "";
+  let fileIds = [];
+  try {
+    aiStatus.textContent = "Preparing the image…";
+    const payload = buildInpaintPayload(lastWarp);
+    aiStatus.textContent = "Sending to Replicate…";
+    let body = await inpaintRequest("POST", payload, controller.signal);
+    predictionId = body.id || "";
+    fileIds = body.fileIds || [];
+    const started = Date.now();
+    while (body.status === "starting" || body.status === "processing") {
+      if (Date.now() - started > 90000) {
+        throw new Error("Timed out after 90 seconds. Showing the scale-to-fit result.");
+      }
+      aiStatus.textContent = "Filling the empty corners…";
+      await delay(1500, controller.signal);
+      const files = encodeURIComponent(fileIds.join(","));
+      body = await inpaintRequest("GET", null, controller.signal, `?id=${encodeURIComponent(body.id)}&files=${files}`);
+    }
+    if (body.status !== "succeeded" || !body.output) {
+      throw new Error(body.error || "Inpainting failed. Showing the scale-to-fit result.");
+    }
+    aiStatus.textContent = "Placing the fill back on the photo…";
+    aiCanvas = await compositeAiResult(lastWarp, body.output);
+    aiKey = warpKey();
+    const adjusted = presentCanvas(aiCanvas);
+    previewCanvas.width = adjusted.width;
+    previewCanvas.height = adjusted.height;
+    previewCanvas.getContext("2d").drawImage(adjusted, 0, 0);
+    aiStatus.textContent = "Empty corners filled.";
+  } catch (error) {
+    aiCanvas = null;
+    if (error.name === "AbortError") {
+      aiStatus.textContent = "Cancelled. Showing the scale-to-fit result.";
+      if (predictionId) {
+        const files = encodeURIComponent(fileIds.join(","));
+        fetch(`/.netlify/functions/inpaint?id=${encodeURIComponent(predictionId)}&files=${files}&cancel=1`).catch(() => {});
+      }
+    } else {
+      aiStatus.textContent = error.message || "Inpainting failed. Showing the scale-to-fit result.";
+    }
+  } finally {
+    aiAbort = null;
+    aiCancel.hidden = true;
+    aiRun.disabled = !aiConsent.checked;
+  }
+}
+
+function buildInpaintPayload(source) {
+  let maxSide = 1536;
+  let encoded = encodeInpaintPair(source, maxSide);
+  while ((encoded.image.length > 3_500_000 || encoded.mask.length > 3_500_000) && maxSide > 512) {
+    maxSide = Math.round(maxSide * 0.75);
+    encoded = encodeInpaintPair(source, maxSide);
+  }
+  return encoded;
+}
+
+function encodeInpaintPair(source, maxSide) {
+  const fitted = fitLongSide(source.width, source.height, maxSide);
+  const canvas = document.createElement("canvas");
+  canvas.width = fitted.width;
+  canvas.height = fitted.height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(source, 0, 0, fitted.width, fitted.height);
+  const image = ctx.getImageData(0, 0, fitted.width, fitted.height);
+  const packed = maskFromAlpha(image.data);
+  const flat = compositeOnWhite(image.data);
+  return {
+    image: canvasToPngDataUrl(flat, fitted.width, fitted.height),
+    mask: canvasToPngDataUrl(packed.mask, fitted.width, fitted.height),
+  };
+}
+
+function canvasToPngDataUrl(pixels, width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").putImageData(new ImageData(pixels, width, height), 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
+async function compositeAiResult(original, dataUrl) {
+  const aiImage = await loadDataImage(dataUrl);
+  const width = original.width;
+  const height = original.height;
+  const scaled = document.createElement("canvas");
+  scaled.width = width;
+  scaled.height = height;
+  const ctx = scaled.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(aiImage, 0, 0, width, height);
+  const originalData = original.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, width, height);
+  const aiData = ctx.getImageData(0, 0, width, height);
+  const merged = compositeFill(originalData.data, aiData.data, maskFromAlpha(originalData.data).mask);
+  const out = document.createElement("canvas");
+  out.width = width;
+  out.height = height;
+  out.getContext("2d").putImageData(new ImageData(merged, width, height), 0, 0);
+  return out;
+}
+
+function loadDataImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not read the filled image. Showing the scale-to-fit result."));
+    image.src = src;
+  });
+}
+
+async function inpaintRequest(method, body, signal, query = "") {
+  const response = await fetch(`/.netlify/functions/inpaint${query}`, {
+    method,
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+    signal,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok && payload.status !== "failed") {
+    throw new Error(payload.error || `Inpaint failed (${response.status}). Showing the scale-to-fit result.`);
+  }
+  if (payload.status === "failed") {
+    throw new Error(payload.error || "Inpainting failed. Showing the scale-to-fit result.");
+  }
+  return payload;
+}
+
+function delay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function frameMode() {
   return document.querySelector('input[name="frame"]:checked').value;
+}
+
+function warpMode() {
+  return frameMode() === "ai" ? "full" : frameMode();
 }
 
 function jpegSelected() {
