@@ -26,6 +26,9 @@ export async function handler(event) {
     if (parsed.cancel) return cancel(parsed.id, parsed.fileIds);
     return create(parsed.image, parsed.mask);
   } catch (error) {
+    if (error.code === 401 || error.code === 402) {
+      return json(error.code, { status: "failed", code: error.code, error: error.message });
+    }
     const message = error instanceof SyntaxError ? "Request JSON could not be read." : error.message;
     return json(500, { status: "failed", error: message || "Inpaint failed." });
   }
@@ -62,10 +65,7 @@ async function create(imageUrl, maskUrl) {
   const prediction = await response.json().catch(() => ({}));
   if (!response.ok) {
     await deleteFiles(token, uploaded);
-    return json(response.status, {
-      status: "failed",
-      error: replicateError(prediction) || `Replicate rejected the request (${response.status}).`,
-    });
+    return accountOrError(response.status, prediction);
   }
   return finish(token, prediction, uploaded);
 }
@@ -80,12 +80,7 @@ async function poll(query) {
     headers: { Authorization: `Bearer ${token}` },
   });
   const prediction = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    return json(response.status, {
-      status: "failed",
-      error: replicateError(prediction) || `Could not read the prediction (${response.status}).`,
-    });
-  }
+  if (!response.ok) return accountOrError(response.status, prediction);
   return finish(token, prediction, fileIdList(String(query.files || "").split(",")));
 }
 
@@ -138,6 +133,11 @@ async function uploadFile(token, dataUrl, filename) {
     body,
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 402) {
+    const failure = new Error(`AI fill unavailable: Replicate account error ${response.status}`);
+    failure.code = response.status;
+    throw failure;
+  }
   if (!response.ok || !payload.urls || !payload.urls.get) {
     throw new Error(replicateError(payload) || "Could not upload the image to Replicate.");
   }
@@ -169,6 +169,16 @@ function decodeDataUrl(value) {
   const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(value);
   if (!match) throw new Error("Image data was not a base64 data URL.");
   return { mime: match[1], bytes: Buffer.from(match[2], "base64") };
+}
+
+function accountOrError(status, payload) {
+  if (status === 401 || status === 402) {
+    return json(status, { status: "failed", code: status, error: `AI fill unavailable: Replicate account error ${status}` });
+  }
+  return json(status, {
+    status: "failed",
+    error: replicateError(payload) || `Replicate rejected the request (${status}).`,
+  });
 }
 
 function replicateError(payload) {

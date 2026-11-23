@@ -7,6 +7,7 @@ import {
   rectangleTargets,
   solveHomography,
 } from "./homography.js";
+import { blendMasked, floorHomography, polygonMask, sideHomography } from "./planes.js";
 import { createPointPicker } from "./point-picker.js";
 import { adjustCanvas, buildMask, compositeOnWhite, patchAverage, whiteBalanceGains } from "./adjust.js";
 import { compositeFill, fitLongSide, maskFromAlpha } from "./netlify/functions/inpaint-logic.js";
@@ -47,7 +48,6 @@ const whiteBalanceNote = $("white-balance-note");
 const clarity = $("clarity");
 const clarityValue = $("clarity-value");
 const aiPanel = $("ai-panel");
-const aiConsent = $("ai-consent");
 const aiRun = $("ai-run");
 const aiCancel = $("ai-cancel");
 const aiStatus = $("ai-status");
@@ -59,6 +59,10 @@ const picker = createPointPicker($("source-canvas"), {
   loupe: $("loupe"),
   onChange: (state) => {
     latest = state;
+    if (!state.roomMode) {
+      latest.floor = [];
+      latest.side = [];
+    }
     undoButton.disabled = !state.canUndo;
     hint.textContent = state.prompt;
     markCorners(state.points.length);
@@ -88,6 +92,16 @@ fileInput.addEventListener("change", () => {
 });
 undoButton.addEventListener("click", () => picker.undo());
 resetButton.addEventListener("click", () => picker.reset());
+for (const input of document.querySelectorAll('input[name="pick"]')) {
+  input.addEventListener("change", () => {
+    const on = $("pick-room").checked;
+    $("room-steps").hidden = !on;
+    picker.setRoomMode(on);
+  });
+}
+$("skip-floor").addEventListener("click", () => picker.skipFloor());
+$("skip-side").addEventListener("click", () => picker.skipSide());
+$("side-done").addEventListener("click", () => picker.acceptSide());
 downloadButton.addEventListener("click", () => download());
 zipButton.addEventListener("click", () => downloadZip());
 
@@ -106,9 +120,6 @@ whiteBalanceButton.addEventListener("click", () => {
   whiteBalanceNote.textContent = pickWhite
     ? "Click a neutral point on the corrected photo."
     : "Click a point on the result that should be neutral.";
-});
-aiConsent.addEventListener("change", () => {
-  aiRun.disabled = !aiConsent.checked || Boolean(aiAbort);
 });
 aiRun.addEventListener("click", () => runAiFill());
 aiCancel.addEventListener("click", () => {
@@ -262,13 +273,14 @@ async function renderPreview(fast) {
   const longest = Math.max(frame.width, frame.height, 320) * dpr;
   const maxEdge = fast ? Math.min(900, longest) : Math.min(1800, Math.max(640, longest));
   try {
-    const result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
+    let result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
       mode: warpMode(),
       destWidth: plan.rect.width,
       destHeight: plan.rect.height,
       maxEdge,
     });
     if (previewDirty) return;
+    if (usesExtraPlanes()) result = { ...result, canvas: await compositeRoom(result, plan) };
     showPreview(result);
     const full = exportSize(plan);
     exportMeta.textContent = full
@@ -426,7 +438,7 @@ async function download() {
   setStatus("Rendering full resolution…");
   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   try {
-    const result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
+    let result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
       mode: warpMode(),
       destWidth: plan.rect.width,
       destHeight: plan.rect.height,
@@ -434,6 +446,7 @@ async function download() {
         downloadButton.textContent = `Rendering ${Math.round(amount * 100)}%`;
       },
     });
+    if (usesExtraPlanes()) result = { ...result, canvas: await compositeRoom(result, plan) };
     const jpeg = jpegSelected();
     const output = presentCanvas(displaySource() || result.canvas);
     const blob = await canvasToBlob(output, jpeg ? "image/jpeg" : "image/png", Number(quality.value) / 100);
@@ -468,11 +481,12 @@ async function downloadZip() {
   setStatus("Rendering full resolution…");
   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
   try {
-    const result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
+    let result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
       mode: warpMode(),
       destWidth: plan.rect.width,
       destHeight: plan.rect.height,
     });
+    if (usesExtraPlanes()) result = { ...result, canvas: await compositeRoom(result, plan) };
     const output = presentCanvas(displaySource() || result.canvas);
     const pixels = output.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, output.width, output.height);
     const packed = buildMask(pixels.data, output.width, output.height);
@@ -554,7 +568,6 @@ function eventToCanvasPixel(canvas, event) {
 }
 
 async function runAiFill() {
-  if (!aiConsent.checked) return;
   if (!lastWarp) {
     aiStatus.textContent = "Place the four corners first.";
     return;
@@ -607,7 +620,7 @@ async function runAiFill() {
   } finally {
     aiAbort = null;
     aiCancel.hidden = true;
-    aiRun.disabled = !aiConsent.checked;
+    aiRun.disabled = false;
   }
 }
 
@@ -683,6 +696,10 @@ async function inpaintRequest(method, body, signal, query = "") {
     signal,
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 402 || payload.code === 401 || payload.code === 402) {
+    const code = payload.code || response.status;
+    throw new Error(`AI fill unavailable: Replicate account error ${code}`);
+  }
   if (!response.ok && payload.status !== "failed") {
     throw new Error(payload.error || `Inpaint failed (${response.status}). Showing the scale-to-fit result.`);
   }
@@ -710,6 +727,47 @@ function frameMode() {
 
 function warpMode() {
   return frameMode() === "ai" ? "full" : frameMode();
+}
+
+function usesExtraPlanes() {
+  if (!$("pick-room").checked) return false;
+  const floor = latest.floor || [];
+  const side = latest.side || [];
+  return floor.length === 4 || side.length === 2 || side.length === 4;
+}
+
+async function compositeRoom(wallResult, plan) {
+  const frame = wallResult.frame;
+  let pixels = wallResult.canvas.getContext("2d", { willReadFrequently: true })
+    .getImageData(0, 0, frame.width, frame.height).data;
+  const paint = async (H, destination) => {
+    const warped = await renderWarp(photo.bitmap, photo.width, photo.height, H, {
+      outputFrame: frame,
+      maxEdge: Infinity,
+    });
+    const overlay = warped.canvas.getContext("2d", { willReadFrequently: true })
+      .getImageData(0, 0, frame.width, frame.height).data;
+    const polygon = destination.map((point) => ({
+      x: ((point.x - frame.originX) / frame.spanX) * frame.width,
+      y: ((point.y - frame.originY) / frame.spanY) * frame.height,
+    }));
+    pixels = blendMasked(pixels, overlay, polygonMask(frame.width, frame.height, polygon, 6));
+  };
+  const floor = latest.floor || [];
+  const side = latest.side || [];
+  if (floor.length === 4) {
+    const built = floorHomography(latest.points, floor, plan.rect.width, plan.rect.height);
+    await paint(built.H, built.destination);
+  }
+  if (side.length === 2 || side.length === 4) {
+    const built = sideHomography(latest.points, side, plan.rect.width, plan.rect.height);
+    await paint(built.H, built.destination);
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+  canvas.getContext("2d").putImageData(new ImageData(pixels, frame.width, frame.height), 0, 0);
+  return canvas;
 }
 
 function jpegSelected() {

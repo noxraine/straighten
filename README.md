@@ -5,7 +5,7 @@ Perspective correction for interior photos. Mark the four corners of a wall or w
 ## Use it
 
 1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
-2. Click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back.
+2. Click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back. **Room mode** adds a floor (near-left, near-right, far-left, far-right) and an optional side wall (outer top and bottom, plus the shared edge if you place it). Skip either extra step. Each plane is warped on its own and blended along the shared wall edges.
 3. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
 4. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
 5. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
@@ -39,7 +39,7 @@ node scripts/make-sample.mjs
 
 ## AI fill
 
-AI fill is optional. It uses the whole-frame result, then sends that image and a mask to [Replicate LaMa](https://replicate.com/twn39/lama) (`twn39/lama`, version `bb9dd3362d559d0953b1d57ec9817f222c162e90047039b1b4af45c47b0b9af9`, inputs `image` and `mask`) through the Netlify function `netlify/functions/inpaint.js`. Set `REPLICATE_API_TOKEN` in the site’s environment. The browser asks for consent before the first call. Replicate keeps an uploaded file for about a day and a prediction output for a limited time; the function deletes the uploaded inputs when the run finishes or is cancelled. If the request fails or times out, the preview stays on the scale-to-fit result.
+AI fill is optional. It uses the whole-frame result, then sends that image and a mask to [Replicate LaMa](https://replicate.com/twn39/lama) (`twn39/lama`, version `bb9dd3362d559d0953b1d57ec9817f222c162e90047039b1b4af45c47b0b9af9`, inputs `image` and `mask`) through the Netlify function `netlify/functions/inpaint.js`. Set `REPLICATE_API_TOKEN` in the site’s environment. A short note under AI fill says the image is sent for that run. Replicate keeps an uploaded file for about a day and a prediction output for a limited time; the function deletes the uploaded inputs when the run finishes or is cancelled. If the request fails, times out, or the account returns 401 or 402, the preview stays on the scale-to-fit result and the page shows a short error.
 
 ## Deploy on Netlify
 

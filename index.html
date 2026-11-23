@@ -52,6 +52,21 @@
               <button type="button" class="ghost" id="replace">Replace</button>
             </div>
           </div>
+          <div class="choice">
+            <label>
+              <input type="radio" name="pick" id="pick-wall" value="wall" checked>
+              <span>4 points</span>
+            </label>
+            <label>
+              <input type="radio" name="pick" id="pick-room" value="room">
+              <span>Room mode</span>
+            </label>
+          </div>
+          <div id="room-steps" class="board-actions" hidden>
+            <button type="button" class="ghost" id="skip-floor">Skip floor</button>
+            <button type="button" class="ghost" id="skip-side">Skip side wall</button>
+            <button type="button" class="ghost" id="side-done">Use side points</button>
+          </div>
           <ol class="corners" id="corners">
             <li data-step="0">Top left</li>
             <li data-step="1">Top right</li>
@@ -102,12 +117,9 @@
             </label>
           </div>
           <div id="ai-panel" hidden>
-            <label class="consent">
-              <input type="checkbox" id="ai-consent">
-              <span>Send this image to Replicate for inpainting. The upload is deleted when the run finishes or you cancel. Replicate still keeps the prediction for a short time, usually under a day, then removes it.</span>
-            </label>
+            <p class="note">The straightened image is sent for this run. Uploaded files are deleted when it finishes or you cancel. The service keeps a prediction briefly, then removes it.</p>
             <div class="board-actions">
-              <button type="button" class="primary" id="ai-run" disabled>Fill empty corners</button>
+              <button type="button" class="primary" id="ai-run">Fill empty corners</button>
               <button type="button" class="ghost" id="ai-cancel" hidden>Cancel</button>
             </div>
             <p id="ai-status" class="note" role="status"></p>
