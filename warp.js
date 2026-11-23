@@ -192,7 +192,13 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
   if (typeof document === "undefined") {
     throw new Error("renderWarp needs a browser.");
   }
-  const mode = options.mode === "crop" ? "crop" : options.mode === "max" ? "max" : "full";
+  const mode = options.outputFrame
+    ? "frame"
+    : options.mode === "crop"
+      ? "crop"
+      : options.mode === "max"
+        ? "max"
+        : "full";
   const destWidth = options.destWidth;
   const destHeight = options.destHeight;
   const Hinv = invert3x3(H);
@@ -204,7 +210,14 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
   let outW = Math.max(2, Math.round(destWidth));
   let outH = Math.max(2, Math.round(destHeight));
   let clamped = false;
-  if (mode === "full" || mode === "max") {
+  if (mode === "frame") {
+    originX = options.outputFrame.originX;
+    originY = options.outputFrame.originY;
+    spanX = options.outputFrame.spanX;
+    spanY = options.outputFrame.spanY;
+    outW = options.outputFrame.width;
+    outH = options.outputFrame.height;
+  } else if (mode === "full" || mode === "max") {
     const fit = fitFrame(H, srcW, srcH);
     clamped = fit.clamped;
     if (mode === "max") {
@@ -278,6 +291,7 @@ async function renderWarpInner(source, srcW, srcH, H, options) {
     capped: fitted.capped,
     clamped,
     renderer,
+    frame: { originX, originY, spanX, spanY, width: outW, height: outH },
   };
 }
 
