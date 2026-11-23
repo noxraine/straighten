@@ -1,12 +1,14 @@
 import {
   blendTowardIdentity,
   fitFrame,
+  maxInscribedRect,
   planRectangle,
   quadProblem,
   rectangleTargets,
   solveHomography,
 } from "./homography.js";
 import { createPointPicker } from "./point-picker.js";
+import { adjustCanvas, buildMask, patchAverage, whiteBalanceGains } from "./adjust.js";
 import { fitOutputSize, renderWarp } from "./warp.js";
 
 const $ = (id) => document.getElementById(id);
@@ -31,12 +33,18 @@ const realHeight = $("real-height");
 const exportMeta = $("export-meta");
 const rendererNote = $("renderer");
 const downloadButton = $("download");
+const zipButton = $("download-zip");
 const quality = $("quality");
 const qualityValue = $("quality-value");
 const qualityRow = $("quality-row");
 const strength = $("strength");
 const strengthValue = $("strength-value");
 const frameNote = $("frame-note");
+const whiteBalanceButton = $("white-balance");
+const whiteBalanceReset = $("white-balance-reset");
+const whiteBalanceNote = $("white-balance-note");
+const clarity = $("clarity");
+const clarityValue = $("clarity-value");
 const roomButton = $("room-button");
 const statusEl = $("status");
 const veil = $("veil");
@@ -54,6 +62,9 @@ const picker = createPointPicker($("source-canvas"), {
 
 let photo = null;
 let latest = { points: [], dragging: false, canUndo: false, prompt: "" };
+let gains = [1, 1, 1];
+let pickWhite = false;
+let lastWarp = null;
 let previewDirty = false;
 let previewRunning = false;
 
@@ -69,21 +80,50 @@ fileInput.addEventListener("change", () => {
 undoButton.addEventListener("click", () => picker.undo());
 resetButton.addEventListener("click", () => picker.reset());
 downloadButton.addEventListener("click", () => download());
+zipButton.addEventListener("click", () => downloadZip());
 
-for (const input of [realWidth, realHeight, quality, strength]) {
+for (const input of [realWidth, realHeight, quality, strength, clarity]) {
   input.addEventListener("input", () => {
     if (input === quality) qualityValue.textContent = `${quality.value}%`;
     if (input === strength) strengthValue.textContent = `${strength.value}%`;
+    if (input === clarity) clarityValue.textContent = clarity.value;
     schedulePreview(false);
   });
 }
+whiteBalanceButton.addEventListener("click", () => {
+  pickWhite = !pickWhite;
+  whiteBalanceButton.classList.toggle("is-on", pickWhite);
+  previewCanvas.classList.toggle("picking", pickWhite);
+  whiteBalanceNote.textContent = pickWhite
+    ? "Click a neutral point on the corrected photo."
+    : "Click a point on the result that should be neutral.";
+});
+whiteBalanceReset.addEventListener("click", () => {
+  gains = [1, 1, 1];
+  pickWhite = false;
+  whiteBalanceButton.classList.remove("is-on");
+  previewCanvas.classList.remove("picking");
+  whiteBalanceNote.textContent = "White balance reset.";
+  schedulePreview(false);
+});
+previewCanvas.addEventListener("click", (event) => {
+  if (!pickWhite || !lastWarp) return;
+  const point = eventToCanvasPixel(previewCanvas, event);
+  if (!point) return;
+  const pixels = lastWarp.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, lastWarp.width, lastWarp.height);
+  const average = patchAverage(pixels.data, lastWarp.width, lastWarp.height, point.x, point.y, 3);
+  gains = whiteBalanceGains(average);
+  pickWhite = false;
+  whiteBalanceButton.classList.remove("is-on");
+  previewCanvas.classList.remove("picking");
+  whiteBalanceNote.textContent = `White balance ${gains.map((gain) => gain.toFixed(2)).join(" · ")}`;
+  schedulePreview(false);
+});
 for (const input of document.querySelectorAll('input[name="frame"], input[name="format"]')) {
   input.addEventListener("change", () => {
     qualityRow.hidden = !jpegSelected();
     downloadButton.textContent = jpegSelected() ? "Download JPEG" : "Download PNG";
-    frameNote.textContent = frameMode() === "full"
-      ? "Straightens the marked surface and keeps the rest of the room in frame. Empty corners stay transparent in PNG and white in JPEG."
-      : "Exports only the surface you marked.";
+    frameNote.textContent = frameNoteText();
     schedulePreview(false);
   });
 }
@@ -195,7 +235,7 @@ async function renderPreview(fast) {
   const plan = currentPlan();
   if (!plan) {
     showPreview(null);
-    downloadButton.disabled = true;
+    setExportEnabled(false);
     return;
   }
   const frame = $("preview-frame").getBoundingClientRect();
@@ -216,7 +256,7 @@ async function renderPreview(fast) {
       ? `${full.width.toLocaleString()} × ${full.height.toLocaleString()} px`
       : "—";
     rendererNote.textContent = result.renderer === "webgl" ? "WebGL" : "CPU";
-    downloadButton.disabled = !full;
+    setExportEnabled(Boolean(full));
     if (!latest.dragging) {
       if (result.clamped && frameMode() === "full") {
         setStatus("The perspective runs off the edge of the shot, so that part was held in. The rest of the photo stays in frame.");
@@ -226,13 +266,14 @@ async function renderPreview(fast) {
     }
   } catch (error) {
     showPreview(null);
-    downloadButton.disabled = true;
+    setExportEnabled(false);
     setStatus(error.message || "Could not build the preview.", true);
   }
 }
 
 function showPreview(result) {
   if (!result) {
+    lastWarp = null;
     previewCanvas.hidden = true;
     previewEmpty.hidden = false;
     rendererNote.textContent = "";
@@ -240,11 +281,17 @@ function showPreview(result) {
   }
   previewEmpty.hidden = true;
   previewCanvas.hidden = false;
-  previewCanvas.width = result.canvas.width;
-  previewCanvas.height = result.canvas.height;
+  lastWarp = result.canvas;
+  const adjusted = presentCanvas(result.canvas);
+  previewCanvas.width = adjusted.width;
+  previewCanvas.height = adjusted.height;
   const ctx = previewCanvas.getContext("2d");
   ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-  ctx.drawImage(result.canvas, 0, 0);
+  ctx.drawImage(adjusted, 0, 0);
+}
+
+function presentCanvas(canvas) {
+  return adjustCanvas(canvas, { gains, clarity: Number(clarity.value) });
 }
 
 function currentPlan() {
@@ -286,7 +333,7 @@ function refreshReadouts() {
     aspectReadout.textContent = "—";
     proportionNote.textContent = "The estimate appears once all four corners are placed.";
     exportMeta.textContent = "—";
-    downloadButton.disabled = true;
+    setExportEnabled(false);
     if (count === 0) setStatus("");
     return;
   }
@@ -320,18 +367,28 @@ function refreshReadouts() {
 
 function exportSize(plan) {
   if (!photo || !plan) return null;
-  if (frameMode() === "full") {
-    const fit = fitFrame(plan.H, photo.width, photo.height);
-    return fitOutputSize(fit.width, fit.height);
+  const mode = frameMode();
+  if (mode === "crop") return fitOutputSize(plan.rect.width, plan.rect.height);
+  const fit = fitFrame(plan.H, photo.width, photo.height);
+  if (mode === "max") {
+    const rect = maxInscribedRect(fit.corners);
+    if (rect) return fitOutputSize(Math.round(rect.width), Math.round(rect.height));
   }
-  return fitOutputSize(plan.rect.width, plan.rect.height);
+  return fitOutputSize(fit.width, fit.height);
+}
+
+function frameNoteText() {
+  const mode = frameMode();
+  if (mode === "max") return "Largest straight rectangle that sits fully inside the straightened photo, with no empty corners.";
+  if (mode === "crop") return "Exports only the surface you marked.";
+  return "Scales the whole straightened photo so every edge stays inside the frame. Empty corners stay transparent in PNG and white in JPEG.";
 }
 
 async function download() {
   const plan = currentPlan();
   const size = plan && exportSize(plan);
   if (!plan || !size) return;
-  downloadButton.disabled = true;
+  setExportEnabled(false);
   const previous = downloadButton.textContent;
   downloadButton.textContent = "Rendering…";
   setStatus("Rendering full resolution…");
@@ -346,7 +403,8 @@ async function download() {
       },
     });
     const jpeg = jpegSelected();
-    const blob = await canvasToBlob(result.canvas, jpeg ? "image/jpeg" : "image/png", Number(quality.value) / 100);
+    const output = presentCanvas(result.canvas);
+    const blob = await canvasToBlob(output, jpeg ? "image/jpeg" : "image/png", Number(quality.value) / 100);
     if (!blob) throw new Error("The browser could not encode the file.");
     const extension = jpeg ? "jpg" : "png";
     const link = document.createElement("a");
@@ -360,9 +418,71 @@ async function download() {
   } catch (error) {
     setStatus(error.message || "Could not save the file.", true);
   } finally {
-    downloadButton.disabled = false;
+    setExportEnabled(true);
     downloadButton.textContent = previous;
   }
+}
+
+async function downloadZip() {
+  if (!window.JSZip) {
+    setStatus("The ZIP library did not load. Check the network and try again.", true);
+    return;
+  }
+  const plan = currentPlan();
+  const size = plan && exportSize(plan);
+  if (!plan || !size) return;
+  setExportEnabled(false);
+  zipButton.textContent = "Rendering…";
+  setStatus("Rendering full resolution…");
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  try {
+    const result = await renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
+      mode: frameMode(),
+      destWidth: plan.rect.width,
+      destHeight: plan.rect.height,
+    });
+    const output = presentCanvas(result.canvas);
+    const pixels = output.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, output.width, output.height);
+    const packed = buildMask(pixels.data, output.width, output.height);
+    const zip = new window.JSZip();
+    const jpeg = await canvasToBlob(output, "image/jpeg", Number(quality.value) / 100);
+    if (!jpeg) throw new Error("The browser could not encode the JPEG.");
+    zip.file("straightened.jpg", jpeg);
+    if (packed.hasEmpty) {
+      const png = await canvasToBlob(output, "image/png");
+      if (!png) throw new Error("The browser could not encode the transparent PNG.");
+      zip.file("straightened_alpha.png", png);
+    }
+    const maskCanvas = document.createElement("canvas");
+    maskCanvas.width = output.width;
+    maskCanvas.height = output.height;
+    maskCanvas.getContext("2d").putImageData(new ImageData(packed.mask, output.width, output.height), 0, 0);
+    const maskBlob = await canvasToBlob(maskCanvas, "image/png");
+    if (!maskBlob) throw new Error("The browser could not encode the mask.");
+    zip.file("mask.png", maskBlob);
+    saveBlob(await zip.generateAsync({ type: "blob" }), "straighten.zip");
+    setStatus(packed.hasEmpty
+      ? "Saved straighten.zip with the JPEG, transparent PNG, and mask."
+      : "Saved straighten.zip with the JPEG and mask.");
+  } catch (error) {
+    setStatus(error.message || "Could not build the ZIP.", true);
+  } finally {
+    setExportEnabled(true);
+    zipButton.textContent = "Download ZIP";
+  }
+}
+
+function setExportEnabled(enabled) {
+  downloadButton.disabled = !enabled;
+  zipButton.disabled = !enabled;
+}
+
+function saveBlob(blob, name) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 4000);
 }
 
 function canvasToBlob(canvas, type, qualityValueNumber) {
@@ -373,7 +493,7 @@ function canvasToBlob(canvas, type, qualityValueNumber) {
   matte.width = canvas.width;
   matte.height = canvas.height;
   const ctx = matte.getContext("2d");
-  ctx.fillStyle = "#f4f1eb";
+  ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, matte.width, matte.height);
   ctx.drawImage(canvas, 0, 0);
   return new Promise((resolve) => matte.toBlob(resolve, type, qualityValueNumber));
@@ -385,6 +505,20 @@ function markCorners(count) {
     item.classList.toggle("done", index < count);
     item.classList.toggle("active", index === count && count < 4);
   });
+}
+
+function eventToCanvasPixel(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1 || canvas.width < 1) return null;
+  const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
+  const drawnW = canvas.width * scale;
+  const drawnH = canvas.height * scale;
+  const originX = rect.left + (rect.width - drawnW) / 2;
+  const originY = rect.top + (rect.height - drawnH) / 2;
+  const x = (event.clientX - originX) / scale;
+  const y = (event.clientY - originY) / scale;
+  if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
+  return { x: Math.round(x), y: Math.round(y) };
 }
 
 function frameMode() {

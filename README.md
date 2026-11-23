@@ -6,9 +6,10 @@ Perspective correction for interior photos. Mark the four corners of a wall or w
 
 1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
 2. Click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back.
-3. The corrected preview updates as you drag. **Whole photo** is the default: the marked surface becomes frontal and the ceiling, floor, and surrounding walls stay in frame. **Crop to selection** keeps only that surface. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
+3. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
 4. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
-5. Download a JPEG (white fill in the empty corners, with a quality slider) or a PNG (those corners stay transparent). The export is full resolution, up to what the browser can encode.
+5. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
+6. Download a JPEG (white fill in the empty corners, with a quality slider) or a PNG (those corners stay transparent). **Download ZIP** packs `straightened.jpg`, `mask.png` (white is photo, black is empty), and `straightened_alpha.png` when the frame has empty corners. The export is full resolution, up to what the browser can encode.
 
 Mouse and touch both work, including on an iPad.
 

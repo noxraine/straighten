@@ -286,6 +286,8 @@ h1 {
   gap: 8px;
 }
 
+.choice.stack { grid-template-columns: 1fr; }
+
 .choice label {
   position: relative;
   border: 1px solid var(--line);
@@ -405,7 +407,16 @@ input[type="range"] {
 
 .ghost:disabled { color: #b3aa9e; }
 
+.ghost.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+#preview-canvas.picking { cursor: crosshair; }
+
 .download { width: 100%; }
+
+.ghost.download { margin-top: 8px; }
 
 .status { min-height: 1.3em; margin-top: 8px; }
 

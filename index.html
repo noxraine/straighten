@@ -83,17 +83,21 @@
       <aside class="panel">
         <section>
           <h2>Frame</h2>
-          <div class="choice">
+          <div class="choice stack">
             <label>
               <input type="radio" name="frame" id="mode-full" value="full" checked>
-              <span>Whole photo</span>
+              <span>Whole frame</span>
+            </label>
+            <label>
+              <input type="radio" name="frame" id="mode-max" value="max">
+              <span>Max crop</span>
             </label>
             <label>
               <input type="radio" name="frame" id="mode-crop" value="crop">
               <span>Crop to selection</span>
             </label>
           </div>
-          <p id="frame-note" class="note">Straightens the marked surface and keeps the rest of the room in frame. Empty corners stay transparent in PNG and white in JPEG.</p>
+          <p id="frame-note" class="note">Scales the whole straightened photo so every edge stays inside the frame. Empty corners stay transparent in PNG and white in JPEG.</p>
           <div class="quality">
             <label for="strength">Correction <span id="strength-value">100%</span></label>
             <input id="strength" type="range" min="0" max="100" value="100">
@@ -118,6 +122,19 @@
         </section>
 
         <section>
+          <h2>Adjust</h2>
+          <div class="board-actions">
+            <button type="button" class="ghost" id="white-balance">Pick white</button>
+            <button type="button" class="ghost" id="white-balance-reset">Reset</button>
+          </div>
+          <p id="white-balance-note" class="note">Click a point on the result that should be neutral.</p>
+          <div class="quality">
+            <label for="clarity">Clarity <span id="clarity-value">0</span></label>
+            <input id="clarity" type="range" min="0" max="30" value="0" step="1">
+          </div>
+        </section>
+
+        <section>
           <h2>Export</h2>
           <div class="choice">
             <label>
@@ -135,6 +152,7 @@
           </div>
           <p class="export-line"><span id="export-meta">—</span></p>
           <button type="button" class="primary download" id="download" disabled>Download JPEG</button>
+          <button type="button" class="ghost download" id="download-zip" disabled>Download ZIP</button>
           <p id="status" class="status" role="status"></p>
         </section>
 
@@ -147,6 +165,7 @@
   <div id="loupe" class="loupe" hidden><canvas id="loupe-canvas" width="168" height="168"></canvas></div>
   <div id="veil" class="veil" hidden><p>Drop to open the photo</p></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
