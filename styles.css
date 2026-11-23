@@ -464,6 +464,15 @@ input[type="range"] {
 
 .status.is-error { color: var(--terracotta); }
 
+.ai-banner {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f6d9d2;
+  color: #6e2a22;
+  font-weight: 600;
+}
+
 .privacy { border-top: 1px solid var(--line); padding-top: 12px; }
 
 .sr {
