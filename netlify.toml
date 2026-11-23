@@ -1,4 +1,10 @@
-# Straighten is already static. Publish the repository root as-is.
+# Straighten is a static site plus one function for optional LaMa inpainting.
 [build]
   publish = "."
   command = "echo No build step"
+
+[functions]
+  directory = "netlify/functions"
+
+[functions.inpaint]
+  timeout = 26
