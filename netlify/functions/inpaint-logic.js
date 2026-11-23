@@ -34,6 +34,44 @@ function checkDataUrl(value, name) {
   return { ok: true };
 }
 
+/** Error JSON for a failed Replicate call. `stage` is validate, create, poll, or fetch-output. */
+export function replicateFailure(status, stage, payload) {
+  if (status === 402) {
+    return {
+      status: "failed",
+      code: 402,
+      stage,
+      error: "insufficient credit",
+    };
+  }
+  if (status === 401) {
+    return {
+      status: "failed",
+      code: 401,
+      stage,
+      error: "The Replicate token was rejected.",
+    };
+  }
+  return {
+    status: "failed",
+    code: status,
+    stage,
+    error: failureText(payload) || `Replicate rejected the request (${status}).`,
+  };
+}
+
+export function healthBody(env = process.env) {
+  return { tokenPresent: Boolean(env && env.REPLICATE_API_TOKEN) };
+}
+
+function failureText(payload) {
+  if (!payload) return "";
+  if (typeof payload.detail === "string") return payload.detail;
+  if (typeof payload.error === "string") return payload.error;
+  if (payload.error && typeof payload.error === "object") return JSON.stringify(payload.error);
+  return "";
+}
+
 export function fileIdList(value) {
   if (!Array.isArray(value)) return [];
   return value.filter((id) => typeof id === "string" && id.trim()).map((id) => id.trim());

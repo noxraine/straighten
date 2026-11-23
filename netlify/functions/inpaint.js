@@ -6,6 +6,8 @@
 import {
   LAMA_VERSION,
   fileIdList,
+  healthBody,
+  replicateFailure,
   validateInpaintBody,
 } from "./inpaint-logic.js";
 
@@ -13,30 +15,54 @@ const REPLICATE = "https://api.replicate.com/v1";
 const WAIT_SECONDS = 8;
 const DATA_URL_BYTE_LIMIT = 200_000;
 
-export async function handler(event) {
+export async function dispatch(request) {
+  const method = request.method;
+  const query = request.query || {};
   try {
-    if (event.httpMethod === "OPTIONS") return json(204, {});
-    if (event.httpMethod === "GET") return poll(event.queryStringParameters || {});
-    if (event.httpMethod !== "POST") {
-      return json(405, { status: "failed", error: "Use POST to start and GET to poll." });
+    if (method === "OPTIONS") return json(204, {});
+    if (method === "GET" && String(query.health) === "1") return json(200, healthBody());
+    if (method === "GET") return poll(query);
+    if (method !== "POST") {
+      return json(405, { status: "failed", stage: "validate", error: "Use POST to start and GET to poll." });
     }
-    const body = JSON.parse(event.body || "{}");
+    let body;
+    try {
+      body = JSON.parse(request.body || "{}");
+    } catch {
+      return json(400, { status: "failed", stage: "validate", error: "Request JSON could not be read." });
+    }
     const parsed = validateInpaintBody(body);
-    if (!parsed.ok) return json(parsed.status, { status: "failed", error: parsed.error });
+    if (!parsed.ok) return json(parsed.status, { status: "failed", stage: "validate", error: parsed.error });
     if (parsed.cancel) return cancel(parsed.id, parsed.fileIds);
     return create(parsed.image, parsed.mask);
   } catch (error) {
-    if (error.code === 401 || error.code === 402) {
-      return json(error.code, { status: "failed", code: error.code, error: error.message });
-    }
-    const message = error instanceof SyntaxError ? "Request JSON could not be read." : error.message;
-    return json(500, { status: "failed", error: message || "Inpaint failed." });
+    const stage = error.stage || "create";
+    if (error.code === 401 || error.code === 402) return json(error.code, replicateFailure(error.code, stage));
+    return json(500, { status: "failed", stage, error: error.message || "Inpaint failed." });
   }
+}
+
+/** Netlify Functions v1. */
+export async function handler(event) {
+  return dispatch({
+    method: event.httpMethod,
+    query: event.queryStringParameters || {},
+    body: event.body,
+  });
+}
+
+/** Netlify Functions v2. Reads the same process.env.REPLICATE_API_TOKEN. */
+export default async function netlifyV2(request) {
+  const url = new URL(request.url);
+  const query = Object.fromEntries(url.searchParams.entries());
+  const body = request.method === "GET" || request.method === "OPTIONS" ? "" : await request.text();
+  const result = await dispatch({ method: request.method, query, body });
+  return new Response(result.body, { status: result.statusCode, headers: result.headers });
 }
 
 async function create(imageUrl, maskUrl) {
   const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) return json(500, { status: "failed", error: "REPLICATE_API_TOKEN is not set." });
+  if (!token) return json(500, { status: "failed", stage: "create", error: "REPLICATE_API_TOKEN is not set." });
 
   const uploaded = [];
   let imageInput = imageUrl;
@@ -65,28 +91,28 @@ async function create(imageUrl, maskUrl) {
   const prediction = await response.json().catch(() => ({}));
   if (!response.ok) {
     await deleteFiles(token, uploaded);
-    return accountOrError(response.status, prediction);
+    return accountOrError(response.status, prediction, "create");
   }
   return finish(token, prediction, uploaded);
 }
 
 async function poll(query) {
   const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) return json(500, { status: "failed", error: "REPLICATE_API_TOKEN is not set." });
+  if (!token) return json(500, { status: "failed", stage: "poll", error: "REPLICATE_API_TOKEN is not set." });
   const id = typeof query.id === "string" ? query.id.trim() : "";
-  if (!id) return json(400, { status: "failed", error: "A prediction id is required." });
+  if (!id) return json(400, { status: "failed", stage: "poll", error: "A prediction id is required." });
   if (query.cancel === "1") return cancel(id, String(query.files || "").split(","));
   const response = await fetch(`${REPLICATE}/predictions/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const prediction = await response.json().catch(() => ({}));
-  if (!response.ok) return accountOrError(response.status, prediction);
+  if (!response.ok) return accountOrError(response.status, prediction, "poll");
   return finish(token, prediction, fileIdList(String(query.files || "").split(",")));
 }
 
 async function cancel(id, fileIds) {
   const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) return json(500, { status: "failed", error: "REPLICATE_API_TOKEN is not set." });
+  if (!token) return json(500, { status: "failed", stage: "poll", error: "REPLICATE_API_TOKEN is not set." });
   await fetch(`${REPLICATE}/predictions/${encodeURIComponent(id)}/cancel`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -104,13 +130,14 @@ async function finish(token, prediction, fileIds) {
       return json(200, { status, id: prediction.id, output });
     } catch (error) {
       await deleteFiles(token, fileIds);
-      return json(502, { status: "failed", id: prediction.id, error: error.message });
+      return json(502, { status: "failed", stage: error.stage || "fetch-output", id: prediction.id, error: error.message });
     }
   }
   if (status === "failed" || status === "canceled" || status === "aborted") {
     await deleteFiles(token, fileIds);
     return json(200, {
       status,
+      stage: "poll",
       id: prediction.id,
       error: replicateError(prediction) || "LaMa did not return an image.",
     });
@@ -134,8 +161,9 @@ async function uploadFile(token, dataUrl, filename) {
   });
   const payload = await response.json().catch(() => ({}));
   if (response.status === 401 || response.status === 402) {
-    const failure = new Error(`AI fill unavailable: Replicate account error ${response.status}`);
+    const failure = new Error(replicateFailure(response.status, "create").error);
     failure.code = response.status;
+    failure.stage = "create";
     throw failure;
   }
   if (!response.ok || !payload.urls || !payload.urls.get) {
@@ -153,13 +181,22 @@ async function deleteFiles(token, ids) {
 
 async function outputToDataUrl(token, output) {
   const url = Array.isArray(output) ? output[0] : output;
-  if (typeof url !== "string" || !url) throw new Error("LaMa returned no image.");
+  if (typeof url !== "string" || !url) {
+    const failure = new Error("LaMa returned no image.");
+    failure.stage = "fetch-output";
+    throw failure;
+  }
   if (url.startsWith("data:image/")) return url;
   let response = await fetch(url);
   if (response.status === 401 || response.status === 403) {
     response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   }
-  if (!response.ok) throw new Error(`Could not download the LaMa image (${response.status}).`);
+  if (!response.ok) {
+    const failure = new Error(`Could not download the LaMa image (${response.status}).`);
+    failure.stage = "fetch-output";
+    failure.code = response.status;
+    throw failure;
+  }
   const bytes = Buffer.from(await response.arrayBuffer());
   const mime = (response.headers.get("content-type") || "image/png").split(";")[0];
   return `data:${mime};base64,${bytes.toString("base64")}`;
@@ -171,14 +208,8 @@ function decodeDataUrl(value) {
   return { mime: match[1], bytes: Buffer.from(match[2], "base64") };
 }
 
-function accountOrError(status, payload) {
-  if (status === 401 || status === 402) {
-    return json(status, { status: "failed", code: status, error: `AI fill unavailable: Replicate account error ${status}` });
-  }
-  return json(status, {
-    status: "failed",
-    error: replicateError(payload) || `Replicate rejected the request (${status}).`,
-  });
+function accountOrError(status, payload, stage) {
+  return json(status, replicateFailure(status, stage, payload));
 }
 
 function replicateError(payload) {
