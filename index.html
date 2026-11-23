@@ -59,20 +59,39 @@
             </label>
             <label>
               <input type="radio" name="pick" id="pick-room" value="room">
-              <span>Room mode</span>
+              <span>Box room</span>
             </label>
           </div>
-          <div id="room-steps" class="board-actions" hidden>
-            <button type="button" class="ghost" id="skip-floor">Skip floor</button>
-            <button type="button" class="ghost" id="skip-side">Skip side wall</button>
-            <button type="button" class="ghost" id="side-done">Use side points</button>
-          </div>
           <ol class="corners" id="corners">
-            <li data-step="0">Top left</li>
-            <li data-step="1">Top right</li>
-            <li data-step="2">Bottom left</li>
-            <li data-step="3">Bottom right</li>
+            <li>Top left</li>
+            <li>Top right</li>
+            <li>Bottom left</li>
+            <li>Bottom right</li>
+            <li class="box-only" hidden>Near ceiling left</li>
+            <li class="box-only" hidden>Near ceiling right</li>
+            <li class="box-only" hidden>Near floor left</li>
+            <li class="box-only" hidden>Near floor right</li>
           </ol>
+          <div id="box-diagram" class="box-diagram" hidden>
+            <svg viewBox="0 0 160 108" aria-hidden="true">
+              <g fill="none" stroke="#8a8175" stroke-width="1.4">
+                <polygon points="16,14 144,14 128,94 32,94"></polygon>
+                <polygon points="46,32 114,32 106,74 54,74"></polygon>
+                <line x1="16" y1="14" x2="46" y2="32"></line>
+                <line x1="144" y1="14" x2="114" y2="32"></line>
+                <line x1="32" y1="94" x2="54" y2="74"></line>
+                <line x1="128" y1="94" x2="106" y2="74"></line>
+              </g>
+              <circle data-corner="4" cx="16" cy="14" r="5.5"></circle>
+              <circle data-corner="5" cx="144" cy="14" r="5.5"></circle>
+              <circle data-corner="0" cx="46" cy="32" r="5.5"></circle>
+              <circle data-corner="1" cx="114" cy="32" r="5.5"></circle>
+              <circle data-corner="2" cx="54" cy="74" r="5.5"></circle>
+              <circle data-corner="3" cx="106" cy="74" r="5.5"></circle>
+              <circle data-corner="6" cx="32" cy="94" r="5.5"></circle>
+              <circle data-corner="7" cx="128" cy="94" r="5.5"></circle>
+            </svg>
+          </div>
           <p id="hint" class="hint">Click the top-left corner</p>
           <div class="frame" id="source-frame">
             <canvas id="source-canvas" aria-label="Photo. Click the corners in the order shown."></canvas>
@@ -87,7 +106,7 @@
             </div>
             <p id="renderer" class="meta renderer"></p>
           </div>
-          <p class="hint quiet">Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.</p>
+          <p id="preview-hint" class="hint quiet">Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.</p>
           <div class="frame preview-frame" id="preview-frame">
             <p id="preview-empty" class="preview-empty">The frontal view appears here after the fourth corner.</p>
             <canvas id="preview-canvas" hidden></canvas>
@@ -130,6 +149,20 @@
             <input id="strength" type="range" min="0" max="100" value="100">
           </div>
           <p class="note">100% looks straight at the wall. Lower it for a gentler shift.</p>
+          <div id="box-panel" hidden>
+            <div class="quality">
+              <label for="fov">Lens / FOV <span id="fov-value">60°</span></label>
+              <input id="fov" type="range" min="18" max="110" value="60" step="1">
+            </div>
+            <p id="lens-note" class="note">The lens is estimated from the vanishing points. Move this when the walls are nearly parallel, or to override the estimate.</p>
+            <div class="board-actions">
+              <button type="button" class="ghost" id="fov-reset">Use estimate</button>
+            </div>
+            <label class="checkline">
+              <input type="checkbox" id="wireframe">
+              <span>Wireframe on the result</span>
+            </label>
+          </div>
         </section>
 
         <section>

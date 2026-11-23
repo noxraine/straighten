@@ -1,14 +1,17 @@
 import {
+  applyHomography,
   blendTowardIdentity,
   fitFrame,
   maxInscribedRect,
+  multiply3x3,
+  placeOnFrame,
   planRectangle,
   quadProblem,
   rectangleTargets,
   solveHomography,
 } from "./homography.js";
-import { blendMasked, floorHomography, polygonMask, sideHomography } from "./planes.js";
 import { createPointPicker } from "./point-picker.js";
+import { reconstructBox } from "./room3d.js";
 import { adjustCanvas, buildMask, compositeOnWhite, patchAverage, whiteBalanceGains } from "./adjust.js";
 import { compositeFill, fitLongSide, maskFromAlpha } from "./netlify/functions/inpaint-logic.js";
 import { fitOutputSize, renderWarp } from "./warp.js";
@@ -59,13 +62,10 @@ const picker = createPointPicker($("source-canvas"), {
   loupe: $("loupe"),
   onChange: (state) => {
     latest = state;
-    if (!state.roomMode) {
-      latest.floor = [];
-      latest.side = [];
-    }
+    if (!state.roomMode) latest.near = [];
     undoButton.disabled = !state.canUndo;
     hint.textContent = state.prompt;
-    markCorners(state.points.length);
+    markCorners(state);
     schedulePreview(state.dragging);
   },
 });
@@ -95,13 +95,24 @@ resetButton.addEventListener("click", () => picker.reset());
 for (const input of document.querySelectorAll('input[name="pick"]')) {
   input.addEventListener("change", () => {
     const on = $("pick-room").checked;
-    $("room-steps").hidden = !on;
+    $("box-panel").hidden = !on;
+    $("preview-hint").textContent = on
+      ? "Eight clicks: the back wall, then the four near corners. The result is one rotation that faces the back wall."
+      : "Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.";
     picker.setRoomMode(on);
   });
 }
-$("skip-floor").addEventListener("click", () => picker.skipFloor());
-$("skip-side").addEventListener("click", () => picker.skipSide());
-$("side-done").addEventListener("click", () => picker.acceptSide());
+$("fov").addEventListener("input", () => {
+  $("fov").dataset.touched = "1";
+  $("fov-value").textContent = `${$("fov").value}°`;
+  schedulePreview(false);
+});
+$("fov-reset").addEventListener("click", () => {
+  delete $("fov").dataset.touched;
+  $("fov-value").textContent = `${$("fov").value}°`;
+  schedulePreview(false);
+});
+$("wireframe").addEventListener("change", () => schedulePreview(false));
 downloadButton.addEventListener("click", () => download());
 zipButton.addEventListener("click", () => downloadZip());
 
@@ -280,8 +291,7 @@ async function renderPreview(fast) {
       maxEdge,
     });
     if (previewDirty) return;
-    if (usesExtraPlanes()) result = { ...result, canvas: await compositeRoom(result, plan) };
-    showPreview(result);
+    showPreview(result, plan);
     const full = exportSize(plan);
     exportMeta.textContent = full
       ? `${full.width.toLocaleString()} × ${full.height.toLocaleString()} px`
@@ -302,12 +312,13 @@ async function renderPreview(fast) {
   }
 }
 
-function showPreview(result) {
+function showPreview(result, plan) {
   if (!result) {
     lastWarp = null;
     previewCanvas.hidden = true;
     previewEmpty.hidden = false;
     rendererNote.textContent = "";
+    picker.setGuide(null);
     return;
   }
   previewEmpty.hidden = true;
@@ -320,6 +331,10 @@ function showPreview(result) {
   const ctx = previewCanvas.getContext("2d");
   ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
   ctx.drawImage(adjusted, 0, 0);
+  if (plan && plan.model && $("wireframe").checked) {
+    drawBoxWire(ctx, result.frame, plan.model, plan.H, adjusted.width, adjusted.height);
+  }
+  picker.setGuide(plan && plan.model ? plan.model.wire : null);
 }
 
 function presentCanvas(canvas) {
@@ -334,7 +349,38 @@ function displaySource() {
 function warpKey() {
   if (!photo) return "";
   const points = latest.points.map((point) => `${Math.round(point.x)},${Math.round(point.y)}`).join(";");
-  return `${photo.width}x${photo.height}|${strength.value}|${points}`;
+  const near = (latest.near || []).map((point) => `${Math.round(point.x)},${Math.round(point.y)}`).join(";");
+  const fov = $("fov").dataset.touched ? $("fov").value : "est";
+  return `${photo.width}x${photo.height}|${strength.value}|${points}|${near}|${fov}|${$("pick-room").checked ? "box" : "wall"}`;
+}
+
+function drawBoxWire(ctx, frame, model, H, width, height) {
+  const scaleX = width / frame.width;
+  const scaleY = height / frame.height;
+  const placed = model.wire.map((point) => {
+    const mapped = applyHomography(H, point.x, point.y);
+    const onFrame = placeOnFrame(frame, mapped.x, mapped.y);
+    return { x: onFrame.x * scaleX, y: onFrame.y * scaleY };
+  });
+  const edges = [
+    [0, 1], [1, 3], [3, 2], [2, 0],
+    [4, 5], [5, 7], [7, 6], [6, 4],
+    [0, 4], [1, 5], [2, 6], [3, 7],
+  ];
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.lineWidth = Math.max(1.5, width / 480);
+  ctx.strokeStyle = "rgba(161, 92, 18, 0.95)";
+  ctx.beginPath();
+  for (const [a, b] of edges) {
+    if (!placed[a] || !placed[b]) continue;
+    if (![placed[a].x, placed[a].y, placed[b].x, placed[b].y].every(Number.isFinite)) continue;
+    ctx.moveTo(placed[a].x, placed[a].y);
+    ctx.lineTo(placed[b].x, placed[b].y);
+  }
+  ctx.stroke();
+  ctx.restore();
 }
 
 function currentPlan() {
@@ -353,6 +399,21 @@ function currentPlan() {
     setStatus(error.message, true);
     return null;
   }
+  if (boxReady()) {
+    try {
+      const model = reconstructBox(latest.points, latest.near, photo.width, photo.height, fovOverride());
+      let H = blendTowardIdentity(model.H, Number(strength.value) / 100);
+      if (frameMode() === "crop") {
+        const projected = latest.points.map((point) => applyHomography(H, point.x, point.y));
+        H = multiply3x3(solveHomography(projected, rectangleTargets(rect.width, rect.height)), H);
+      }
+      updateLensNote(model);
+      return { rect, H, model };
+    } catch (error) {
+      setStatus(error.message || "Could not reconstruct the box.", true);
+      return null;
+    }
+  }
   let H;
   try {
     H = homographyFor(latest.points, rect);
@@ -361,6 +422,26 @@ function currentPlan() {
     return null;
   }
   return { rect, H };
+}
+
+function boxReady() {
+  return $("pick-room").checked && latest.points.length === 4 && (latest.near || []).length === 4;
+}
+
+function fovOverride() {
+  if (!$("fov").dataset.touched) return {};
+  return { fovDegrees: Number($("fov").value) };
+}
+
+function updateLensNote(model) {
+  const override = Boolean($("fov").dataset.touched);
+  if (!override && model.degenerate) {
+    $("lens-note").textContent = "The walls are nearly parallel, so the lens fell back to 60°. Move the slider if the room looks too wide or too tight.";
+  } else if (override) {
+    $("lens-note").textContent = `Lens override ${$("fov").value}°. Use estimate to go back to the vanishing-point focal length.`;
+  } else {
+    $("lens-note").textContent = `Estimated lens ${Math.round(model.fov)}°. Move the slider to override it.`;
+  }
 }
 
 function homographyFor(points, rect) {
@@ -372,9 +453,12 @@ function homographyFor(points, rect) {
 
 function refreshReadouts() {
   const count = latest.points.length;
+  const box = $("pick-room").checked;
   if (count < 4) {
     aspectReadout.textContent = "—";
-    proportionNote.textContent = "The estimate appears once all four corners are placed.";
+    proportionNote.textContent = box
+      ? "Mark the back wall first, then the four near corners."
+      : "The estimate appears once all four corners are placed.";
     exportMeta.textContent = "—";
     setExportEnabled(false);
     if (count === 0) setStatus("");
@@ -389,12 +473,34 @@ function refreshReadouts() {
   const real = realValues();
   const rect = planRectangle(latest.points, real.width, real.height);
   aspectReadout.textContent = formatRatio(rect.aspect);
-  if (rect.measured) {
+  if (box && (latest.near || []).length < 4) {
+    proportionNote.textContent = `Back wall ${formatRatio(rect.estimated)}. Add the four near corners to recover the box.`;
+  } else if (boxReady()) {
+    try {
+      const model = reconstructBox(latest.points, latest.near, photo.width, photo.height, fovOverride());
+      const ratio = formatRatio(model.width / model.height);
+      const depth = (model.depth / model.height).toFixed(2);
+      aspectReadout.textContent = ratio;
+      proportionNote.textContent = rect.measured
+        ? `Box ${ratio}, depth ${depth} × the height. Crop uses the size you entered.`
+        : `Box ${ratio}, depth ${depth} × the height.`;
+    } catch {
+      proportionNote.textContent = "Could not recover the box from these corners.";
+    }
+  } else if (rect.measured) {
     proportionNote.textContent = "Locked to the width and height you entered. Only the ratio is used.";
   } else if (filled(realWidth) !== filled(realHeight)) {
     proportionNote.textContent = "Enter both width and height to lock the ratio. Any unit is fine.";
   } else {
     proportionNote.textContent = `From the quad’s edges (${formatRatio(rect.estimated)}). Enter a real width and height if you know them.`;
+  }
+  if (boxReady()) {
+    const built = currentPlan();
+    const full = built && exportSize(built);
+    exportMeta.textContent = full
+      ? `${full.width.toLocaleString()} × ${full.height.toLocaleString()} px`
+      : "—";
+    return;
   }
   const plan = { rect, H: null };
   try {
@@ -446,7 +552,6 @@ async function download() {
         downloadButton.textContent = `Rendering ${Math.round(amount * 100)}%`;
       },
     });
-    if (usesExtraPlanes()) result = { ...result, canvas: await compositeRoom(result, plan) };
     const jpeg = jpegSelected();
     const output = presentCanvas(displaySource() || result.canvas);
     const blob = await canvasToBlob(output, jpeg ? "image/jpeg" : "image/png", Number(quality.value) / 100);
@@ -486,7 +591,6 @@ async function downloadZip() {
       destWidth: plan.rect.width,
       destHeight: plan.rect.height,
     });
-    if (usesExtraPlanes()) result = { ...result, canvas: await compositeRoom(result, plan) };
     const output = presentCanvas(displaySource() || result.canvas);
     const pixels = output.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, output.width, output.height);
     const packed = buildMask(pixels.data, output.width, output.height);
@@ -545,11 +649,26 @@ function canvasToBlob(canvas, type, qualityValueNumber) {
   return new Promise((resolve) => matte.toBlob(resolve, type, qualityValueNumber));
 }
 
-function markCorners(count) {
-  const items = corners.querySelectorAll("li");
-  items.forEach((item, index) => {
+function markCorners(state) {
+  const box = $("pick-room").checked;
+  const count = state.points.length + (box ? (state.near || []).length : 0);
+  const total = box ? 8 : 4;
+  const labels = box
+    ? ["Back top left", "Back top right", "Back bottom left", "Back bottom right",
+      "Near ceiling left", "Near ceiling right", "Near floor left", "Near floor right"]
+    : ["Top left", "Top right", "Bottom left", "Bottom right"];
+  corners.querySelectorAll("li").forEach((item, index) => {
+    item.hidden = index >= total;
+    if (labels[index]) item.textContent = labels[index];
     item.classList.toggle("done", index < count);
-    item.classList.toggle("active", index === count && count < 4);
+    item.classList.toggle("active", index === count && count < total);
+  });
+  const diagram = $("box-diagram");
+  diagram.hidden = !box;
+  diagram.querySelectorAll("circle").forEach((circle) => {
+    const index = Number(circle.dataset.corner);
+    circle.classList.toggle("done", index < count);
+    circle.classList.toggle("next", index === count && count < 8);
   });
 }
 
@@ -727,47 +846,6 @@ function frameMode() {
 
 function warpMode() {
   return frameMode() === "ai" ? "full" : frameMode();
-}
-
-function usesExtraPlanes() {
-  if (!$("pick-room").checked) return false;
-  const floor = latest.floor || [];
-  const side = latest.side || [];
-  return floor.length === 4 || side.length === 2 || side.length === 4;
-}
-
-async function compositeRoom(wallResult, plan) {
-  const frame = wallResult.frame;
-  let pixels = wallResult.canvas.getContext("2d", { willReadFrequently: true })
-    .getImageData(0, 0, frame.width, frame.height).data;
-  const paint = async (H, destination) => {
-    const warped = await renderWarp(photo.bitmap, photo.width, photo.height, H, {
-      outputFrame: frame,
-      maxEdge: Infinity,
-    });
-    const overlay = warped.canvas.getContext("2d", { willReadFrequently: true })
-      .getImageData(0, 0, frame.width, frame.height).data;
-    const polygon = destination.map((point) => ({
-      x: ((point.x - frame.originX) / frame.spanX) * frame.width,
-      y: ((point.y - frame.originY) / frame.spanY) * frame.height,
-    }));
-    pixels = blendMasked(pixels, overlay, polygonMask(frame.width, frame.height, polygon, 6));
-  };
-  const floor = latest.floor || [];
-  const side = latest.side || [];
-  if (floor.length === 4) {
-    const built = floorHomography(latest.points, floor, plan.rect.width, plan.rect.height);
-    await paint(built.H, built.destination);
-  }
-  if (side.length === 2 || side.length === 4) {
-    const built = sideHomography(latest.points, side, plan.rect.width, plan.rect.height);
-    await paint(built.H, built.destination);
-  }
-  const canvas = document.createElement("canvas");
-  canvas.width = frame.width;
-  canvas.height = frame.height;
-  canvas.getContext("2d").putImageData(new ImageData(pixels, frame.width, frame.height), 0, 0);
-  return canvas;
 }
 
 function jpegSelected() {

@@ -5,7 +5,7 @@ Perspective correction for interior photos. Mark the four corners of a wall or w
 ## Use it
 
 1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
-2. Click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back. **Room mode** adds a floor (near-left, near-right, far-left, far-right) and an optional side wall (outer top and bottom, plus the shared edge if you place it). Skip either extra step. Each plane is warped on its own and blended along the shared wall edges.
+2. Click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back one point. **Box room** replaces that flow with eight clicks: the same four back-wall corners, then the near ceiling-left, ceiling-right, floor-left, and floor-right. A small diagram marks the next corner. Near corners may sit on the padded margin just outside the photo, and a click anywhere on a depth edge is accepted. The gold wire on the photo is the snapped box.
 3. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
 4. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
 5. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
@@ -29,7 +29,7 @@ Open `http://127.0.0.1:47821`. ES modules do not load from a `file://` URL, so u
 node --test
 ```
 
-The tests cover the homography (normalized DLT, inverse, a skewed quad mapped back to a rectangle) and the CPU warp. There are no npm dependencies.
+The tests cover the homography (normalized DLT, inverse, a skewed quad mapped back to a rectangle), the CPU warp, and the box-room solver. `test/room3d.test.js` builds a synthetic cuboid, projects it, adds noise, slides the near points along their edges, and checks the recovered focal length, proportions, and that the frontal back wall is a rectangle with vertical sides. There are no npm dependencies.
 
 Regenerate the built-in sample wall with:
 
@@ -51,6 +51,18 @@ The site is the repository itself: `index.html`, the ES modules, `styles.css`, a
 - **Build command:** `echo No build step` (a no-op)
 
 Connect the repo in Netlify, or drag this folder onto [Netlify Drop](https://app.netlify.com/drop). No environment variables are required.
+
+## Box room
+
+Box room assumes a rectangular cuboid, every angle 90°. The four back-wall edges give the horizontal and vertical vanishing points, and the four depth edges (back corner to near corner) give the depth vanishing point, each by a least-squares fit in homogeneous coordinates so a nearly parallel pair can sit at infinity. The principal point is the image center and pixels are square. When two finite vanishing points are orthogonal, the focal length is `f² = -(v1 - c) · (v2 - c)`. A one-point view has no finite pair, so the lens falls back to a 60° horizontal field of view. The **Lens / FOV** slider overrides that estimate once you move it.
+
+The camera rotation is the wall’s axes expressed in the camera frame. Width, height, and depth are recovered up to scale. A near click only has to lie on its depth edge: each click is dropped onto the line from its back corner through the depth vanishing point, the four near corners are forced to one shared depth so they stay a rectangle parallel to the back wall, and a few Levenberg-Marquardt iterations reduce the reprojection error. Back corners use point-to-point distance. Near clicks use point-to-line distance, so an edge click is a valid measurement. If that pass does not clearly beat the closed form, the closed form is kept.
+
+The warp is not a separate homography per face. The virtual camera stays at the same center and turns to face the back wall. That rotation is one homography for the whole image,
+
+`H = K Rᵀ K⁻¹`
+
+where the columns of `R` are the wall’s right, down, and forward axes and `K` is the camera matrix (focal length and the image center). `K` is unchanged because the lens does not move; only the orientation changes. There is no dolly. Every pixel, and therefore all five faces, is mapped by that same `H`, so the floor, ceiling, and side walls meet the back wall after the warp. Whole frame and Max crop then fit that image the same way they fit a four-point result. Crop to selection places the now-frontal back wall into the chosen rectangle. **Wireframe on the result** draws the refined box through this same `H`.
 
 ## How the correction works
 
