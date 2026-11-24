@@ -4,8 +4,8 @@ Perspective correction for interior photos. Mark the four corners of a wall or w
 
 ## Use it
 
-1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
-2. Click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back one point. **Box room** replaces that flow with eight clicks: the same four back-wall corners, then the near ceiling-left, ceiling-right, floor-left, and floor-right. A small diagram marks the next corner. Near corners may sit on the padded margin just outside the photo, and a click anywhere on a depth edge is accepted. The gold wire on the photo is the snapped box.
+1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected. **AI Frontal (Qwen)** is the default. Click the wall that should face the camera, then **Сделать фронтальной (AI)**. Qwen returns a new photo; mark its four corners and the ordinary correction runs. **4 points** and **Box room** stay available.
+2. In 4 points, click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back one point. **Box room** replaces that flow with eight clicks: the same four back-wall corners, then the near ceiling-left, ceiling-right, floor-left, and floor-right. A small diagram marks the next corner. Near corners may sit on the padded margin just outside the photo, and a click anywhere on a depth edge is accepted. The gold wire on the photo is the snapped box.
 3. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
 4. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
 5. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
@@ -29,13 +29,17 @@ Open `http://127.0.0.1:47821`. ES modules do not load from a `file://` URL, so u
 node --test
 ```
 
-The tests cover the homography (normalized DLT, inverse, a skewed quad mapped back to a rectangle), the CPU warp, the box-room solver, and AI fill. `test/room3d.test.js` builds synthetic cuboids, including off-center cameras, noise, and near points slid along their edges. The frontal back wall must be an axis-aligned rectangle within `1e-6` px, the floor axis must be vertical within `1e-6`, the floor and ceiling bands must match, and the back-face homography must match four-point mode up to scale and translation. `test/ai-fill.test.js` checks the request body and the error text, including a 402. There are no npm dependencies.
+The tests cover the homography (normalized DLT, inverse, a skewed quad mapped back to a rectangle), the CPU warp, the box-room solver, and AI fill. `test/room3d.test.js` builds synthetic cuboids, including off-center cameras, noise, and near points slid along their edges. The frontal back wall must be an axis-aligned rectangle within `1e-6` px, the floor axis must be vertical within `1e-6`, the floor and ceiling bands must match, and the back-face homography must match four-point mode up to scale and translation. `test/ai-fill.test.js` checks the request body and the error text, including a 402. `test/qwen-frontal-logic.test.js` checks the rotation hint, the Qwen input, and error text. There are no npm dependencies.
 
 Regenerate the built-in sample wall with:
 
 ```bash
 node scripts/make-sample.mjs
 ```
+
+## AI Frontal (Qwen)
+
+The default mode sends the photo to Replicate’s `qwen/qwen-edit-multiangle` through `netlify/functions/qwen-frontal.js`. The browser draws a red circle (radius 2% of the short side, `#ff0000`, thin white outline) on a JPEG no longer than 1536 pixels and posts it with `rotate_degrees` and `multiple_angles_strength`. The rotation hint is `round(clamp(-(markerX / width - 0.5) * 90, -45, 45))`: a marker on the left is a positive “rotate left”. Advanced can override that from -90° to 90°, and the angle strength from 0 to 2. The function calls `POST https://api.replicate.com/v1/models/qwen/qwen-edit-multiangle/predictions` with `Prefer: wait=8`, `vertical_tilt` 0, and `output_format` png. The page polls `GET /.netlify/functions/qwen-frontal?id=…` the same way as inpaint. Status text is «Отправка в Qwen…», «Обработка…», and «Готово». `GET ?health=1` returns `{ "tokenPresent": true }` without calling Replicate. Errors keep the status code and a `stage`. **Повторить** runs it again. **Использовать оригинал** restores the upload. After the result is the working image, four clicks use the same homography as 4-point mode. **Достроить углы (AI)** sends empty corners to the existing LaMa fill when the frame still has them.
 
 ## AI fill
 
