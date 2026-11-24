@@ -19,7 +19,7 @@
         <p class="eyebrow"><span class="swatch" aria-hidden="true"></span> Perspective correction</p>
         <h1>Straighten</h1>
       </div>
-      <p class="lede">Mark the four corners of a wall. Qwen turns the camera to face it, then you can fine-tune or square the result.</p>
+      <p class="lede">Mark the four corners of a wall. Qwen turns the camera until that wall is frontal.</p>
     </header>
 
     <div id="dropzone" class="dropzone">
@@ -59,26 +59,11 @@
               <button type="button" class="ghost" id="qwen-cancel" hidden>Cancel</button>
             </div>
             <p id="qwen-status" class="note" role="status"></p>
-            <div id="tune-panel" hidden>
-              <div class="quality">
-                <label for="tune-rotate">Поворот <span id="tune-rotate-value">0°</span></label>
-                <input id="tune-rotate" type="range" min="-45" max="45" value="0" step="1">
-              </div>
-              <div class="quality">
-                <label for="tune-tilt">Наклон <span id="tune-tilt-value">0</span></label>
-                <input id="tune-tilt" type="range" min="-1" max="1" value="0" step="0.1">
-              </div>
-              <div class="quality">
-                <label for="tune-zoom">Масштаб <span id="tune-zoom-value">1.0</span></label>
-                <input id="tune-zoom" type="range" min="0.5" max="2" value="1" step="0.05">
-              </div>
-              <div class="board-actions">
-                <button type="button" class="ghost" id="qwen-retry">Повторить в Qwen</button>
-              </div>
-            </div>
+            <p id="direction" class="hint">Направление: отметьте 4 угла</p>
             <div id="qwen-actions" class="board-actions" hidden>
-              <button type="button" class="ghost" id="qwen-original">Сбросить</button>
-              <button type="button" class="ghost" id="qwen-fill">Достроить углы (AI)</button>
+              <button type="button" class="primary" id="qwen-download">Скачать</button>
+              <button type="button" class="ghost" id="qwen-retry">Повторить</button>
+              <button type="button" class="ghost" id="qwen-original">Новое фото</button>
             </div>
           </div>
           <ol class="corners" id="corners">
@@ -101,15 +86,15 @@
             </div>
             <p id="renderer" class="meta renderer"></p>
           </div>
-          <p id="preview-hint" class="hint quiet">Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.</p>
+          <p id="preview-hint" class="hint quiet">The frontal photo from Qwen appears here.</p>
           <div class="frame preview-frame" id="preview-frame">
-            <p id="preview-empty" class="preview-empty">The frontal view appears here after the fourth corner.</p>
+            <p id="preview-empty" class="preview-empty">The frontal photo appears here after Qwen.</p>
             <canvas id="preview-canvas" hidden></canvas>
           </div>
         </section>
       </div>
 
-      <aside class="panel">
+      <aside class="panel" hidden>
         <section>
           <h2>Frame</h2>
           <div class="choice stack">

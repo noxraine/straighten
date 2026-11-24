@@ -18,12 +18,12 @@ import {
   formatAiError,
 } from "./ai-fill.js";
 import {
-  clampRotate,
-  clampTilt,
+  directionLabel,
+  directionPrompt,
   estimateCameraFromQuad,
   formatQwenError,
-  previewHomography,
   validateQwenBody,
+  wallDirection,
 } from "./netlify/functions/qwen-frontal-logic.js";
 import { fitRoomFrame, layoutRoom, reconstructBox } from "./room3d.js";
 import { fitOutputSize, renderRoomWarp, renderWarp } from "./warp.js";
@@ -78,6 +78,7 @@ const picker = createPointPicker($("source-canvas"), {
     undoButton.disabled = !state.canUndo;
     hint.textContent = state.prompt;
     markCorners(state);
+    updateDirection(!state.dragging);
     schedulePreview(state.dragging);
   },
 });
@@ -86,6 +87,8 @@ let photo = null;
 let originalPhoto = null;
 let workingIsQwen = false;
 let qwenEstimate = null;
+let qwenResult = null;
+let latestDirection = null;
 let qwenAbort = null;
 let aiFillOn = false;
 let cameraFrame = 0;
@@ -110,19 +113,13 @@ fileInput.addEventListener("change", () => {
 });
 undoButton.addEventListener("click", () => picker.undo());
 resetButton.addEventListener("click", () => picker.reset());
-$("qwen-run").addEventListener("click", () => runQwen(false));
-$("qwen-retry").addEventListener("click", () => runQwen(true));
+$("qwen-run").addEventListener("click", () => runQwen());
+$("qwen-retry").addEventListener("click", () => runQwen());
+$("qwen-download").addEventListener("click", () => downloadQwen());
 $("qwen-cancel").addEventListener("click", () => {
   if (qwenAbort) qwenAbort.abort();
 });
-$("qwen-original").addEventListener("click", () => useOriginalPhoto());
-$("qwen-fill").addEventListener("click", () => fillQwenCorners());
-for (const input of [$("tune-rotate"), $("tune-tilt"), $("tune-zoom")]) {
-  input.addEventListener("input", () => {
-    refreshTuneLabels();
-    queueCameraPreview();
-  });
-}
+$("qwen-original").addEventListener("click", () => newPhoto());
 picker.setLoopOrder(true);
 downloadButton.addEventListener("click", () => download());
 zipButton.addEventListener("click", () => downloadZip());
@@ -280,47 +277,24 @@ async function openFile(file) {
 }
 
 function syncStage() {
-  $("tune-panel").hidden = !workingIsQwen;
-  $("qwen-actions").hidden = !workingIsQwen;
-  $("qwen-run").hidden = workingIsQwen;
-  picker.setLoopOrder(!workingIsQwen);
-  picker.setEnabled(true);
-  $("preview-hint").textContent = workingIsQwen
-    ? "Optional: mark top left, top right, bottom left, bottom right for a true rectangle. Otherwise the sliders are what exports."
-    : "Mark the wall in order, then straighten it.";
+  const done = Boolean(qwenResult);
+  $("qwen-actions").hidden = !done;
+  $("qwen-run").hidden = done;
 }
 
-function refreshTuneLabels() {
-  $("tune-rotate-value").textContent = `${$("tune-rotate").value}°`;
-  $("tune-tilt-value").textContent = Number($("tune-tilt").value).toFixed(1);
-  $("tune-zoom-value").textContent = Number($("tune-zoom").value).toFixed(2);
-}
-
-function resetTuneSliders() {
-  $("tune-rotate").value = "0";
-  $("tune-tilt").value = "0";
-  $("tune-zoom").value = "1";
-  refreshTuneLabels();
-}
-
-function tuneControls() {
-  return {
-    rotateDegrees: Number($("tune-rotate").value),
-    verticalTilt: Number($("tune-tilt").value),
-    zoom: Number($("tune-zoom").value),
-    moveForward: 0,
-    useWideAngle: false,
-    multipleAnglesStrength: 1,
-  };
-}
-
-function queueCameraPreview() {
-  if (!workingIsQwen || !photo) return;
-  if (cameraFrame) return;
-  cameraFrame = requestAnimationFrame(() => {
-    cameraFrame = 0;
-    schedulePreview(true);
-  });
+function updateDirection(log) {
+  const line = $("direction");
+  if (!line) return;
+  if (!photo || latest.points.length !== 4) {
+    line.textContent = "Направление: отметьте 4 угла";
+    latestDirection = null;
+    return;
+  }
+  const estimate = estimateCameraFromQuad(latest.points, photo.width, photo.height);
+  const direction = wallDirection(estimate);
+  latestDirection = direction;
+  line.textContent = directionLabel(direction);
+  if (log) console.info("[Qwen]", direction, directionPrompt(direction));
 }
 
 function showQwenProgress(message) {
@@ -335,7 +309,7 @@ function showQwenBanner(message) {
   if (message) console.error("[Qwen]", message);
 }
 
-async function runQwen(retry) {
+async function runQwen() {
   if (qwenAbort) return;
   const source = originalPhoto || photo;
   if (!source) {
@@ -364,31 +338,24 @@ async function runQwen(retry) {
     if (!healthResponse.ok) throw Object.assign(new Error(formatQwenError({ status: healthResponse.status, payload: health })), { qwen: true });
     if (health.tokenPresent === false) throw Object.assign(new Error("REPLICATE_API_TOKEN is not set."), { qwen: true });
 
-    let rotateDegrees;
-    let verticalTilt;
-    if (retry && qwenEstimate) {
-      const tune = tuneControls();
-      rotateDegrees = clampRotate(qwenEstimate.rotateDegrees + tune.rotateDegrees);
-      verticalTilt = clampTilt(qwenEstimate.verticalTilt + tune.verticalTilt);
-    } else {
-      if (latest.points.length !== 4) {
-        showQwenBanner("Place all four wall corners first.");
-        qwenAbort = null;
-        $("qwen-cancel").hidden = true;
-        $("qwen-run").disabled = false;
-        $("qwen-retry").disabled = false;
-        return;
-      }
-      qwenEstimate = estimateCameraFromQuad(latest.points, source.width, source.height);
-      rotateDegrees = qwenEstimate.rotateDegrees;
-      verticalTilt = qwenEstimate.verticalTilt;
+    if (latest.points.length !== 4) {
+      showQwenBanner("Place all four wall corners first.");
+      qwenAbort = null;
+      $("qwen-cancel").hidden = true;
+      $("qwen-run").disabled = false;
+      $("qwen-retry").disabled = false;
+      return;
     }
-    console.info("[Qwen]", { rotate_degrees: rotateDegrees, vertical_tilt: verticalTilt, retry: Boolean(retry) });
+    qwenEstimate = estimateCameraFromQuad(latest.points, source.width, source.height);
+    latestDirection = wallDirection(qwenEstimate);
+    const prompt = directionPrompt(latestDirection);
+    console.info("[Qwen]", latestDirection, prompt);
     showQwenProgress("Отправка в Qwen…");
     const body = {
       image: originalJpeg(source.bitmap, source.width, source.height),
-      rotate_degrees: rotateDegrees,
-      vertical_tilt: verticalTilt,
+      prompt,
+      rotate_degrees: 0,
+      vertical_tilt: 0,
       move_forward: 0,
       use_wide_angle: false,
       multiple_angles_strength: 1,
@@ -498,40 +465,48 @@ async function adoptQwenImage(dataUrl) {
   canvas.width = image.naturalWidth || image.width;
   canvas.height = image.naturalHeight || image.height;
   canvas.getContext("2d").drawImage(image, 0, 0);
-  const bitmap = typeof createImageBitmap === "function" ? await createImageBitmap(canvas) : canvas;
-  if (workingIsQwen && photo && photo.bitmap && photo.bitmap !== originalPhoto.bitmap && photo.bitmap.close) {
-    photo.bitmap.close();
-  }
-  photo = {
-    bitmap,
-    width: canvas.width,
-    height: canvas.height,
-    name: originalPhoto ? originalPhoto.name : "qwen",
-  };
-  workingIsQwen = true;
-  $("qwen-actions").hidden = false;
-  fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
-  picker.setImage(bitmap, canvas.width, canvas.height);
-  resetTuneSliders();
+  qwenResult = canvas;
   syncStage();
-  previewEmpty.textContent = "The rectangle appears after the fourth corner. The sliders can be exported on their own.";
+  paintResult(canvas);
 }
 
-function useOriginalPhoto() {
-  if (!originalPhoto) return;
-  if (workingIsQwen && photo && photo.bitmap && photo.bitmap !== originalPhoto.bitmap && photo.bitmap.close) {
-    photo.bitmap.close();
-  }
-  photo = originalPhoto;
-  workingIsQwen = false;
-  $("qwen-actions").hidden = true;
-  fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
+function paintResult(canvas) {
+  previewEmpty.hidden = true;
+  previewCanvas.hidden = false;
+  previewCanvas.width = canvas.width;
+  previewCanvas.height = canvas.height;
+  previewCanvas.getContext("2d").drawImage(canvas, 0, 0);
+}
+
+function downloadQwen() {
+  if (!qwenResult) return;
+  qwenResult.toBlob((blob) => {
+    if (!blob) return;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "straighten.png";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 4000);
+  }, "image/png");
+}
+
+function newPhoto() {
+  if (qwenAbort) qwenAbort.abort();
+  qwenResult = null;
+  qwenEstimate = null;
+  latestDirection = null;
+  if (photo && photo.bitmap && photo.bitmap.close) photo.bitmap.close();
+  photo = null;
+  originalPhoto = null;
+  workspace.hidden = true;
+  dropzone.hidden = false;
+  previewCanvas.hidden = true;
+  previewEmpty.hidden = false;
+  syncStage();
   showQwenBanner("");
   showQwenProgress("");
-  qwenEstimate = null;
-  resetTuneSliders();
-  picker.setImage(photo.bitmap, photo.width, photo.height);
-  syncStage();
+  const line = $("direction");
+  if (line) line.textContent = "Направление: отметьте 4 угла";
 }
 
 async function fillQwenCorners() {
@@ -592,6 +567,10 @@ function renderPlan(plan, extra) {
 }
 
 async function renderPreview(fast) {
+  if (qwenResult) {
+    paintResult(qwenResult);
+    return;
+  }
   const plan = currentPlan();
   if (!plan) {
     showPreview(null);
