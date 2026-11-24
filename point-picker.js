@@ -14,6 +14,14 @@ const PROMPTS = [
   "Drag any corner to adjust",
 ];
 
+const LOOP_PROMPTS = [
+  "1. Top left",
+  "2. Top right",
+  "3. Bottom right",
+  "4. Bottom left",
+  "Drag any corner to adjust",
+];
+
 const BACK_PROMPTS = [
   "Back wall: click the top-left corner",
   "Back wall: click the top-right corner",
@@ -47,6 +55,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   let markerMode = false;
   let roomMode = false;
   let enabled = true;
+  let loopOrder = false;
   let undoStack = [];
   let dragIndex = -1;
   let dragList = null;
@@ -137,6 +146,17 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     emit(false);
   }
 
+  function setLoopOrder(on) {
+    const next = Boolean(on);
+    if (next !== loopOrder) {
+      points = [];
+      undoStack = [];
+    }
+    loopOrder = next;
+    draw();
+    emit(false);
+  }
+
   function setEnabled(on) {
     enabled = Boolean(on);
     if (!enabled) {
@@ -170,6 +190,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
       marker: marker ? { x: marker.x, y: marker.y } : null,
       markerMode,
       roomMode,
+      loopOrder,
       prompt: roomPrompt(),
     });
   }
@@ -181,7 +202,10 @@ export function createPointPicker(canvas, { loupe, onChange }) {
         ? "Click again to move the marker, then make the wall frontal."
         : "Click the wall that should face the camera.";
     }
-    if (!roomMode) return PROMPTS[Math.min(points.length, PROMPTS.length - 1)];
+    if (!roomMode) {
+      const prompts = loopOrder ? LOOP_PROMPTS : PROMPTS;
+      return prompts[Math.min(points.length, prompts.length - 1)];
+    }
     if (points.length < 4) return BACK_PROMPTS[points.length];
     return NEAR_PROMPTS[Math.min(nearPoints.length, NEAR_PROMPTS.length - 1)];
   }
@@ -218,7 +242,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
         [0, 4], [1, 5], [2, 6], [3, 7],
       ], "#a15c12", dpr);
     }
-    strokeGroup(points, [[0, 1], [1, 3], [3, 2], [2, 0]], "#1c1914", dpr);
+    strokeGroup(points, loopOrder ? [[0, 1], [1, 2], [2, 3], [3, 0]] : [[0, 1], [1, 3], [3, 2], [2, 0]], "#1c1914", dpr);
     strokeGroup(nearPoints, [[0, 1], [2, 3]], "#1d4e63", dpr);
     for (let i = 0; i < nearPoints.length && i < points.length; i++) {
       strokeGroup([points[i], nearPoints[i]], [[0, 1]], "#1d4e63", dpr);
@@ -490,6 +514,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     setMarkerMode,
     setMarker,
     setEnabled,
+    setLoopOrder,
     setGuide,
     redraw: draw,
     hideLoupe,

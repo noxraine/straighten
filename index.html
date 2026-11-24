@@ -19,7 +19,7 @@
         <p class="eyebrow"><span class="swatch" aria-hidden="true"></span> Perspective correction</p>
         <h1>Straighten</h1>
       </div>
-      <p class="lede">Set the camera, send the original photo to Qwen, then mark the four corners of the wall that should be square.</p>
+      <p class="lede">Mark the four corners of a wall. Qwen turns the camera to face it, then you can fine-tune or square the result.</p>
     </header>
 
     <div id="dropzone" class="dropzone">
@@ -53,45 +53,41 @@
             </div>
           </div>
           <div id="qwen-panel">
-            <div class="quality">
-              <label for="rotate-degrees">Поворот <span id="rotate-value">0°</span></label>
-              <input id="rotate-degrees" type="range" min="-90" max="90" value="0" step="1">
-            </div>
-            <div class="quality">
-              <label for="vertical-tilt">Наклон <span id="tilt-value">0</span></label>
-              <input id="vertical-tilt" type="range" min="-1" max="1" value="0" step="0.1">
-            </div>
-            <div class="quality">
-              <label for="move-forward">Приближение <span id="forward-value">0</span></label>
-              <input id="move-forward" type="range" min="0" max="5" value="0" step="0.5">
-            </div>
-            <label class="checkline">
-              <input type="checkbox" id="wide-angle">
-              <span>Широкий угол</span>
-            </label>
-            <div class="quality">
-              <label for="angles-strength">Сила эффекта <span id="angles-value">1.0</span></label>
-              <input id="angles-strength" type="range" min="0" max="2" value="1" step="0.1">
-            </div>
             <p id="qwen-banner" class="ai-banner" hidden role="alert"></p>
             <div class="board-actions">
-              <button type="button" class="primary" id="qwen-run">Отправить в Qwen</button>
+              <button type="button" class="primary" id="qwen-run">Выпрямить стену (AI)</button>
               <button type="button" class="ghost" id="qwen-cancel" hidden>Cancel</button>
             </div>
             <p id="qwen-status" class="note" role="status"></p>
+            <div id="tune-panel" hidden>
+              <div class="quality">
+                <label for="tune-rotate">Поворот <span id="tune-rotate-value">0°</span></label>
+                <input id="tune-rotate" type="range" min="-45" max="45" value="0" step="1">
+              </div>
+              <div class="quality">
+                <label for="tune-tilt">Наклон <span id="tune-tilt-value">0</span></label>
+                <input id="tune-tilt" type="range" min="-1" max="1" value="0" step="0.1">
+              </div>
+              <div class="quality">
+                <label for="tune-zoom">Масштаб <span id="tune-zoom-value">1.0</span></label>
+                <input id="tune-zoom" type="range" min="0.5" max="2" value="1" step="0.05">
+              </div>
+              <div class="board-actions">
+                <button type="button" class="ghost" id="qwen-retry">Повторить в Qwen</button>
+              </div>
+            </div>
             <div id="qwen-actions" class="board-actions" hidden>
-              <button type="button" class="ghost" id="qwen-retry">Повторить</button>
               <button type="button" class="ghost" id="qwen-original">Сбросить</button>
               <button type="button" class="ghost" id="qwen-fill">Достроить углы (AI)</button>
             </div>
           </div>
-          <ol class="corners" id="corners" hidden>
+          <ol class="corners" id="corners">
             <li>Top left</li>
             <li>Top right</li>
-            <li>Bottom left</li>
             <li>Bottom right</li>
+            <li>Bottom left</li>
           </ol>
-          <p id="hint" class="hint">The sliders preview a camera move. Qwen receives the original photo.</p>
+          <p id="hint" class="hint">1. Top left</p>
           <div class="frame" id="source-frame">
             <canvas id="source-canvas" aria-label="Photo. Click the corners in the order shown."></canvas>
           </div>

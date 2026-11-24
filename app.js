@@ -18,6 +18,9 @@ import {
   formatAiError,
 } from "./ai-fill.js";
 import {
+  clampRotate,
+  clampTilt,
+  estimateCameraFromQuad,
   formatQwenError,
   previewHomography,
   validateQwenBody,
@@ -82,6 +85,7 @@ const picker = createPointPicker($("source-canvas"), {
 let photo = null;
 let originalPhoto = null;
 let workingIsQwen = false;
+let qwenEstimate = null;
 let qwenAbort = null;
 let aiFillOn = false;
 let cameraFrame = 0;
@@ -106,20 +110,20 @@ fileInput.addEventListener("change", () => {
 });
 undoButton.addEventListener("click", () => picker.undo());
 resetButton.addEventListener("click", () => picker.reset());
-$("qwen-run").addEventListener("click", () => runQwen());
-$("qwen-retry").addEventListener("click", () => runQwen());
+$("qwen-run").addEventListener("click", () => runQwen(false));
+$("qwen-retry").addEventListener("click", () => runQwen(true));
 $("qwen-cancel").addEventListener("click", () => {
   if (qwenAbort) qwenAbort.abort();
 });
 $("qwen-original").addEventListener("click", () => useOriginalPhoto());
 $("qwen-fill").addEventListener("click", () => fillQwenCorners());
-for (const input of [$("rotate-degrees"), $("vertical-tilt"), $("move-forward"), $("angles-strength"), $("wide-angle")]) {
+for (const input of [$("tune-rotate"), $("tune-tilt"), $("tune-zoom")]) {
   input.addEventListener("input", () => {
-    refreshCameraLabels();
+    refreshTuneLabels();
     queueCameraPreview();
   });
 }
-picker.setEnabled(false);
+picker.setLoopOrder(true);
 downloadButton.addEventListener("click", () => download());
 zipButton.addEventListener("click", () => downloadZip());
 
@@ -257,13 +261,14 @@ async function openFile(file) {
     };
     photo = originalPhoto;
     workingIsQwen = false;
+    qwenEstimate = null;
     dropzone.hidden = true;
     workspace.hidden = false;
     fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
     $("qwen-actions").hidden = true;
     showQwenBanner("");
     showQwenProgress("");
-    syncPickMode();
+    syncStage();
     picker.setImage(photo.bitmap, photo.width, photo.height);
     setStatus("");
     requestAnimationFrame(() => picker.redraw());
@@ -274,45 +279,43 @@ async function openFile(file) {
   }
 }
 
-function syncPickMode() {
-  $("corners").hidden = !workingIsQwen;
-  picker.setEnabled(workingIsQwen);
+function syncStage() {
+  $("tune-panel").hidden = !workingIsQwen;
+  $("qwen-actions").hidden = !workingIsQwen;
+  $("qwen-run").hidden = workingIsQwen;
+  picker.setLoopOrder(!workingIsQwen);
+  picker.setEnabled(true);
   $("preview-hint").textContent = workingIsQwen
-    ? "Mark the four corners of the frontal wall: top left, top right, bottom left, bottom right."
-    : "This preview is only a camera sketch. Qwen receives the original photo.";
-  hint.textContent = workingIsQwen
-    ? "Click the top-left corner"
-    : "The sliders preview a camera move. Qwen receives the original photo.";
+    ? "Optional: mark top left, top right, bottom left, bottom right for a true rectangle. Otherwise the sliders are what exports."
+    : "Mark the wall in order, then straighten it.";
 }
 
-function refreshCameraLabels() {
-  $("rotate-value").textContent = `${$("rotate-degrees").value}°`;
-  $("tilt-value").textContent = Number($("vertical-tilt").value).toFixed(1);
-  $("forward-value").textContent = Number($("move-forward").value).toFixed(1);
-  $("angles-value").textContent = Number($("angles-strength").value).toFixed(1);
+function refreshTuneLabels() {
+  $("tune-rotate-value").textContent = `${$("tune-rotate").value}°`;
+  $("tune-tilt-value").textContent = Number($("tune-tilt").value).toFixed(1);
+  $("tune-zoom-value").textContent = Number($("tune-zoom").value).toFixed(2);
 }
 
-function resetCameraSliders() {
-  $("rotate-degrees").value = "0";
-  $("vertical-tilt").value = "0";
-  $("move-forward").value = "0";
-  $("wide-angle").checked = false;
-  $("angles-strength").value = "1";
-  refreshCameraLabels();
+function resetTuneSliders() {
+  $("tune-rotate").value = "0";
+  $("tune-tilt").value = "0";
+  $("tune-zoom").value = "1";
+  refreshTuneLabels();
 }
 
-function cameraControls() {
+function tuneControls() {
   return {
-    rotateDegrees: Number($("rotate-degrees").value),
-    verticalTilt: Number($("vertical-tilt").value),
-    moveForward: Number($("move-forward").value),
-    useWideAngle: $("wide-angle").checked,
-    multipleAnglesStrength: Number($("angles-strength").value),
+    rotateDegrees: Number($("tune-rotate").value),
+    verticalTilt: Number($("tune-tilt").value),
+    zoom: Number($("tune-zoom").value),
+    moveForward: 0,
+    useWideAngle: false,
+    multipleAnglesStrength: 1,
   };
 }
 
 function queueCameraPreview() {
-  if (workingIsQwen || !photo) return;
+  if (!workingIsQwen || !photo) return;
   if (cameraFrame) return;
   cameraFrame = requestAnimationFrame(() => {
     cameraFrame = 0;
@@ -332,7 +335,7 @@ function showQwenBanner(message) {
   if (message) console.error("[Qwen]", message);
 }
 
-async function runQwen() {
+async function runQwen(retry) {
   if (qwenAbort) return;
   const source = originalPhoto || photo;
   if (!source) {
@@ -361,15 +364,34 @@ async function runQwen() {
     if (!healthResponse.ok) throw Object.assign(new Error(formatQwenError({ status: healthResponse.status, payload: health })), { qwen: true });
     if (health.tokenPresent === false) throw Object.assign(new Error("REPLICATE_API_TOKEN is not set."), { qwen: true });
 
+    let rotateDegrees;
+    let verticalTilt;
+    if (retry && qwenEstimate) {
+      const tune = tuneControls();
+      rotateDegrees = clampRotate(qwenEstimate.rotateDegrees + tune.rotateDegrees);
+      verticalTilt = clampTilt(qwenEstimate.verticalTilt + tune.verticalTilt);
+    } else {
+      if (latest.points.length !== 4) {
+        showQwenBanner("Place all four wall corners first.");
+        qwenAbort = null;
+        $("qwen-cancel").hidden = true;
+        $("qwen-run").disabled = false;
+        $("qwen-retry").disabled = false;
+        return;
+      }
+      qwenEstimate = estimateCameraFromQuad(latest.points, source.width, source.height);
+      rotateDegrees = qwenEstimate.rotateDegrees;
+      verticalTilt = qwenEstimate.verticalTilt;
+    }
+    console.info("[Qwen]", { rotate_degrees: rotateDegrees, vertical_tilt: verticalTilt, retry: Boolean(retry) });
     showQwenProgress("Отправка в Qwen…");
-    const controls = cameraControls();
     const body = {
       image: originalJpeg(source.bitmap, source.width, source.height),
-      rotate_degrees: controls.rotateDegrees,
-      vertical_tilt: controls.verticalTilt,
-      move_forward: controls.moveForward,
-      use_wide_angle: controls.useWideAngle,
-      multiple_angles_strength: controls.multipleAnglesStrength,
+      rotate_degrees: rotateDegrees,
+      vertical_tilt: verticalTilt,
+      move_forward: 0,
+      use_wide_angle: false,
+      multiple_angles_strength: 1,
     };
     const parsed = validateQwenBody(body);
     if (!parsed.ok) throw Object.assign(new Error(parsed.error), { qwen: true });
@@ -490,8 +512,9 @@ async function adoptQwenImage(dataUrl) {
   $("qwen-actions").hidden = false;
   fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
   picker.setImage(bitmap, canvas.width, canvas.height);
-  syncPickMode();
-  previewEmpty.textContent = "The frontal view appears here after the fourth corner.";
+  resetTuneSliders();
+  syncStage();
+  previewEmpty.textContent = "The rectangle appears after the fourth corner. The sliders can be exported on their own.";
 }
 
 function useOriginalPhoto() {
@@ -505,10 +528,10 @@ function useOriginalPhoto() {
   fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
   showQwenBanner("");
   showQwenProgress("");
-  resetCameraSliders();
+  qwenEstimate = null;
+  resetTuneSliders();
   picker.setImage(photo.bitmap, photo.width, photo.height);
-  syncPickMode();
-  queueCameraPreview();
+  syncStage();
 }
 
 async function fillQwenCorners() {
@@ -561,7 +584,7 @@ function renderPlan(plan, extra) {
     });
   }
   return renderWarp(photo.bitmap, photo.width, photo.height, plan.H, {
-    mode: plan.preview ? "full" : warpMode(),
+    mode: plan.tune || plan.preview ? "full" : warpMode(),
     destWidth: plan.rect ? plan.rect.width : photo.width,
     destHeight: plan.rect ? plan.rect.height : photo.height,
     ...extra,
@@ -679,12 +702,16 @@ function drawBoxWire(ctx, frame, points, width, height) {
 
 function currentPlan() {
   if (!photo) return null;
-  if (!workingIsQwen) {
+  if (workingIsQwen && latest.points.length === 4 && !latest.loopOrder) {
+    // fall through to the four-point homography
+  } else if (workingIsQwen) {
     return {
-      preview: true,
-      H: previewHomography(photo.width, photo.height, cameraControls()),
+      tune: true,
+      H: previewHomography(photo.width, photo.height, tuneControls()),
       rect: { width: photo.width, height: photo.height },
     };
+  } else {
+    return null;
   }
   if (latest.points.length !== 4) return null;
   const problem = quadProblem(latest.points);
@@ -763,14 +790,18 @@ function refreshReadouts() {
   const count = latest.points.length;
   const roomEl = $("pick-room");
   const box = Boolean(roomEl && roomEl.checked);
-  if (count < 4) {
+  if (!workingIsQwen) {
     aspectReadout.textContent = "—";
-    proportionNote.textContent = box
-      ? "Mark the back wall first, then the four near corners."
-      : "The estimate appears once all four corners are placed.";
+    proportionNote.textContent = count < 4
+      ? "Place all four corners. The order is top left, top right, bottom right, bottom left."
+      : "Ready. Straighten sends the original photo with the turn estimated from these corners.";
     exportMeta.textContent = "—";
     setExportEnabled(false);
-    if (count === 0) setStatus("");
+    return;
+  }
+  if (count < 4 || latest.loopOrder) {
+    aspectReadout.textContent = "—";
+    proportionNote.textContent = "Add four corners for a true rectangle, or export the slider view.";
     return;
   }
   const problem = quadProblem(latest.points);
@@ -823,6 +854,7 @@ function refreshReadouts() {
 
 function exportSize(plan) {
   if (!photo || !plan || plan.preview) return null;
+  if (plan.tune && frameMode() === "crop") return fitOutputSize(plan.rect.width, plan.rect.height);
   const mode = frameMode();
   if (plan.layout) {
     if (mode === "crop") return fitOutputSize(plan.layout.backWidth, plan.layout.backHeight);
@@ -959,7 +991,6 @@ function canvasToBlob(canvas, type, qualityValueNumber) {
 }
 
 function markCorners(state) {
-  $("corners").hidden = !workingIsQwen;
   const roomEl = $("pick-room");
   const box = Boolean(roomEl && roomEl.checked);
   const count = state.points.length + (box ? (state.near || []).length : 0);
@@ -967,7 +998,9 @@ function markCorners(state) {
   const labels = box
     ? ["Back top left", "Back top right", "Back bottom left", "Back bottom right",
       "Near ceiling left", "Near ceiling right", "Near floor left", "Near floor right"]
-    : ["Top left", "Top right", "Bottom left", "Bottom right"];
+    : state.loopOrder
+      ? ["Top left", "Top right", "Bottom right", "Bottom left"]
+      : ["Top left", "Top right", "Bottom left", "Bottom right"];
   corners.querySelectorAll("li").forEach((item, index) => {
     item.hidden = index >= total;
     if (labels[index]) item.textContent = labels[index];
