@@ -4,6 +4,7 @@ import { applyHomography } from "../homography.js";
 import {
   QWEN_PROMPT,
   buildQwenInput,
+  estimateCameraFromQuad,
   formatQwenError,
   previewHomography,
   validateQwenBody,
@@ -28,6 +29,33 @@ test("the local preview turns the camera left when rotate_degrees is positive", 
   });
   const up = applyHomography(tilted, 500, 400);
   assert.ok(up.y < 380, `tilt moved to ${up.y}`);
+});
+
+test("a turned wall estimates the camera turn, and a frontal wall stays near zero", () => {
+  const width = 1000;
+  const height = 800;
+  const focal = width / (2 * Math.tan(Math.PI / 6));
+  const project = (point) => ({
+    x: width / 2 + focal * point[0] / point[2],
+    y: height / 2 + focal * point[1] / point[2],
+  });
+  const wall = (yaw) => {
+    const right = [Math.cos(yaw), 0, -Math.sin(yaw)];
+    const down = [0, 1, 0];
+    const normal = [Math.sin(yaw), 0, Math.cos(yaw)];
+    const center = normal.map((value) => value * 8);
+    const signs = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    return signs.map(([sx, sy]) => project([
+      center[0] + right[0] * sx * 1.6 + down[0] * sy * 1.2,
+      center[1] + right[1] * sx * 1.6 + down[1] * sy * 1.2,
+      center[2] + right[2] * sx * 1.6 + down[2] * sy * 1.2,
+    ]));
+  };
+  const frontal = estimateCameraFromQuad(wall(0), width, height);
+  assert.ok(Math.abs(frontal.rotateDegrees) <= 2, `frontal yaw ${frontal.rotateDegrees}`);
+  assert.ok(Math.abs(frontal.verticalTilt) <= 0.08, `frontal tilt ${frontal.verticalTilt}`);
+  const turned = estimateCameraFromQuad(wall(25 * Math.PI / 180), width, height);
+  assert.ok(turned.rotateDegrees < -12 && turned.rotateDegrees > -40, `turned yaw ${turned.rotateDegrees}`);
 });
 
 test("the Qwen input is a camera edit of the original image", () => {

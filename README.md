@@ -1,16 +1,16 @@
 # Straighten
 
-Perspective correction for interior photos. Mark the four corners of a wall or window and the shot is rebuilt as if the camera had been square to that surface. The rest of the room stays in frame. Everything runs in the browser. Photos are not uploaded.
+Perspective correction for interior photos. Mark a wall, let Qwen turn the camera toward it, then square that wall if you want a true rectangle.
 
 ## Use it
 
 1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
-2. The sliders (**Поворот**, **Наклон**, **Приближение**, **Широкий угол**, **Сила эффекта**) draw a local camera preview. It is not uploaded. **Отправить в Qwen** sends the original photo, downscaled to 1536 pixels, with those slider values.
-3. Qwen’s picture replaces the working photo. Click its wall corners in order: **top left, top right, bottom left, bottom right**. Drag a point to nudge it. **Повторить** sends the original again. **Сбросить** restores the upload and the default sliders. **Достроить углы (AI)** fills empty corners with LaMa when the frame has any.
-3. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
-4. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
-5. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
-6. Download a JPEG (white fill in the empty corners, with a quality slider) or a PNG (those corners stay transparent). **Download ZIP** packs `straightened.jpg`, `mask.png` (white is photo, black is empty), and `straightened_alpha.png` when the frame has empty corners. The export is full resolution, up to what the browser can encode.
+2. Click the wall in order: **top left, top right, bottom right, bottom left**. **Выпрямить стену (AI)** sends the original photo (max 1536 px JPEG) with a hidden camera estimate. The turn is logged as `[Qwen]`.
+3. The result replaces the working photo. **Поворот**, **Наклон**, and **Масштаб** preview a local homography and are what export uses until you add four corners (top left, top right, bottom left, bottom right) for the ordinary rectangle correction. **Повторить в Qwen** sends the original again with the slider rotation and tilt added to the estimate. **Сбросить** restores the upload. **Достроить углы (AI)** fills empty corners with LaMa.
+4. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
+5. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
+6. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
+7. Download a JPEG (white fill in the empty corners, with a quality slider) or a PNG (those corners stay transparent). **Download ZIP** packs `straightened.jpg`, `mask.png` (white is photo, black is empty), and `straightened_alpha.png` when the frame has empty corners. The export is full resolution, up to what the browser can encode.
 
 Mouse and touch both work, including on an iPad.
 
@@ -40,9 +40,9 @@ node scripts/make-sample.mjs
 
 ## Qwen camera
 
-Sliders preview `H = Zoom · K · Ry(yaw) · Rx(pitch) · K⁻¹` in WebGL. Focal length is `width / (2 tan(30°))`, or an 80° field of view when **Широкий угол** is on. Positive **Поворот** turns the camera left. **Наклон** is a fraction of 30°. **Приближение** zooms about the center by `1 + 0.15 × move_forward`. **Сила эффекта** scales the two angles. None of that homography is sent.
+The four clicks are mapped to a unit rectangle. With a 60° horizontal focal length and the principal point at the image center, that homography yields the wall normal. `rotate_degrees` is the negation of `atan2(nx, nz)` so a wall facing to the right of the camera (positive x) is a right turn; Qwen treats positive as rotate left. `vertical_tilt` is `-pitch / 45°`, so a low viewpoint is positive and a top-down view is negative. A bad decomposition falls back to edge lengths: a longer right side turns the camera right, a wider bottom edge is a low angle.
 
-**Отправить в Qwen** posts the original JPEG to `/.netlify/functions/qwen-frontal`, which calls `POST https://api.replicate.com/v1/models/qwen/qwen-edit-multiangle/predictions` with prompt `preserve all existing content, camera rotation only, no new objects`, the five camera inputs, `aspect_ratio=match_input_image`, `go_fast`, `use_multiple_angles`, and `output_format=png`. Polling, health, and error stages match the inpaint function.
+**Выпрямить стену (AI)** posts the original JPEG to `/.netlify/functions/qwen-frontal`, which calls `POST https://api.replicate.com/v1/models/qwen/qwen-edit-multiangle/predictions` with prompt `preserve all existing content, camera rotation only`, those two angles, `move_forward` 0, `use_wide_angle` false, `multiple_angles_strength` 1, `go_fast`, `use_multiple_angles`, `aspect_ratio=match_input_image`, and `output_format=png`. The fine-tune sliders use `H = Zoom · K · Ry · Rx · K⁻¹` only on the result. Polling, health, and error stages match the inpaint function.
 
 ## AI fill
 
