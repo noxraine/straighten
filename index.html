@@ -19,7 +19,7 @@
         <p class="eyebrow"><span class="swatch" aria-hidden="true"></span> Perspective correction</p>
         <h1>Straighten</h1>
       </div>
-      <p class="lede">Mark a wall or window. Straighten rebuilds the shot as if you had stepped square to it, and keeps the ceiling, floor, and the rest of the room in frame. The file never leaves this device.</p>
+      <p class="lede">Click the wall that should face you, or mark its corners yourself. AI Frontal sends that photo only when you ask. 4 points and Box room stay on this device.</p>
     </header>
 
     <div id="dropzone" class="dropzone">
@@ -52,15 +52,44 @@
               <button type="button" class="ghost" id="replace">Replace</button>
             </div>
           </div>
-          <div class="choice">
+          <div class="choice pick-choice">
             <label>
-              <input type="radio" name="pick" id="pick-wall" value="wall" checked>
+              <input type="radio" name="pick" id="pick-qwen" value="qwen" checked>
+              <span>AI Frontal (Qwen)</span>
+            </label>
+            <label>
+              <input type="radio" name="pick" id="pick-wall" value="wall">
               <span>4 points</span>
             </label>
             <label>
               <input type="radio" name="pick" id="pick-room" value="room">
               <span>Box room</span>
             </label>
+          </div>
+          <div id="qwen-panel">
+            <p id="qwen-banner" class="ai-banner" hidden role="alert"></p>
+            <div class="board-actions">
+              <button type="button" class="primary" id="qwen-run">Сделать фронтальной (AI)</button>
+              <button type="button" class="ghost" id="qwen-cancel" hidden>Cancel</button>
+            </div>
+            <p id="qwen-status" class="note" role="status"></p>
+            <details id="qwen-advanced">
+              <summary>Advanced</summary>
+              <div class="quality">
+                <label for="rotate-degrees">Rotate <span id="rotate-value">0°</span></label>
+                <input id="rotate-degrees" type="range" min="-90" max="90" value="0" step="1">
+              </div>
+              <div class="quality">
+                <label for="angles-strength">Angle strength <span id="angles-value">1.0</span></label>
+                <input id="angles-strength" type="range" min="0" max="2" value="1" step="0.1">
+              </div>
+              <p class="note">Positive rotate turns the camera left. 0° is eye level. The strength slider is how hard Qwen pushes the new angle.</p>
+            </details>
+            <div id="qwen-actions" class="board-actions" hidden>
+              <button type="button" class="ghost" id="qwen-retry">Повторить</button>
+              <button type="button" class="ghost" id="qwen-original">Использовать оригинал</button>
+              <button type="button" class="ghost" id="qwen-fill">Достроить углы (AI)</button>
+            </div>
           </div>
           <ol class="corners" id="corners">
             <li>Top left</li>
@@ -92,7 +121,7 @@
               <circle data-corner="7" cx="128" cy="94" r="5.5"></circle>
             </svg>
           </div>
-          <p id="hint" class="hint">Click the top-left corner</p>
+          <p id="hint" class="hint">Click the wall that should face the camera.</p>
           <div class="frame" id="source-frame">
             <canvas id="source-canvas" aria-label="Photo. Click the corners in the order shown."></canvas>
           </div>

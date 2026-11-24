@@ -315,6 +315,14 @@ h1 {
   gap: 8px;
 }
 
+.pick-choice { grid-template-columns: 1fr; }
+
+details summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin: 8px 0;
+}
+
 .choice.stack { grid-template-columns: 1fr; }
 
 .consent {
@@ -537,6 +545,10 @@ input[type="range"] {
   .board-head { align-items: flex-start; flex-direction: column; }
   .frame { height: 62vw; min-height: 260px; }
   .lede { font-size: 0.98rem; }
+}
+
+@media (min-width: 721px) {
+  .pick-choice { grid-template-columns: 1fr 1fr 1fr; }
 }
 
 @media (max-width: 420px) {

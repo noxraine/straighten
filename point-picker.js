@@ -43,6 +43,8 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   let points = [];
   let nearPoints = [];
   let guide = null;
+  let marker = null;
+  let markerMode = false;
   let roomMode = false;
   let undoStack = [];
   let dragIndex = -1;
@@ -67,6 +69,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     points = [];
     nearPoints = [];
     guide = null;
+    marker = null;
     undoStack = [];
     dragIndex = -1;
     dragList = null;
@@ -80,6 +83,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     const previous = undoStack.pop();
     points = previous.points;
     nearPoints = previous.near;
+    marker = previous.marker;
     guide = null;
     draw();
     emit(false);
@@ -87,10 +91,11 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   }
 
   function reset() {
-    if (points.length === 0 && nearPoints.length === 0 && undoStack.length === 0) return;
+    if (points.length === 0 && nearPoints.length === 0 && !marker && undoStack.length === 0) return;
     snapshot();
     points = [];
     nearPoints = [];
+    marker = null;
     guide = null;
     dragIndex = -1;
     dragList = null;
@@ -103,16 +108,36 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     undoStack.push({
       points: points.map((p) => ({ x: p.x, y: p.y })),
       near: nearPoints.map((p) => ({ x: p.x, y: p.y })),
+      marker: marker ? { x: marker.x, y: marker.y } : null,
     });
     if (undoStack.length > 40) undoStack.shift();
   }
 
   function setRoomMode(on) {
     roomMode = Boolean(on);
+    if (roomMode) markerMode = false;
     if (!roomMode) {
       nearPoints = [];
       guide = null;
     }
+    draw();
+    emit(false);
+  }
+
+  function setMarkerMode(on) {
+    markerMode = Boolean(on);
+    if (markerMode) {
+      roomMode = false;
+      nearPoints = [];
+      guide = null;
+      points = [];
+    }
+    draw();
+    emit(false);
+  }
+
+  function setMarker(point) {
+    marker = point ? { x: point.x, y: point.y } : null;
     draw();
     emit(false);
   }
@@ -128,12 +153,19 @@ export function createPointPicker(canvas, { loupe, onChange }) {
       dragging,
       canUndo: undoStack.length > 0,
       near: nearPoints.map((p) => ({ x: p.x, y: p.y })),
+      marker: marker ? { x: marker.x, y: marker.y } : null,
+      markerMode,
       roomMode,
       prompt: roomPrompt(),
     });
   }
 
   function roomPrompt() {
+    if (markerMode) {
+      return marker
+        ? "Click again to move the marker, then make the wall frontal."
+        : "Click the wall that should face the camera.";
+    }
     if (!roomMode) return PROMPTS[Math.min(points.length, PROMPTS.length - 1)];
     if (points.length < 4) return BACK_PROMPTS[points.length];
     return NEAR_PROMPTS[Math.min(nearPoints.length, NEAR_PROMPTS.length - 1)];
@@ -178,6 +210,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     }
     drawDots(points, POINT_COLORS, dpr);
     drawDots(nearPoints, NEAR_COLORS, dpr);
+    if (marker) drawMarker(dpr);
   }
 
   function strokeGroup(group, edges, color, dpr) {
@@ -214,6 +247,18 @@ export function createPointPicker(canvas, { loupe, onChange }) {
       ctx.textBaseline = "middle";
       ctx.fillText(String(i + 1), p.x, p.y + 0.5 * dpr);
     }
+  }
+
+  function drawMarker(dpr) {
+    const p = toCanvas(marker);
+    const radius = Math.max(10 * dpr, 0.02 * Math.min(fit.w, fit.h));
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = "#ff0000";
+    ctx.fill();
+    ctx.lineWidth = Math.max(1.5 * dpr, radius * 0.08);
+    ctx.strokeStyle = "#ffffff";
+    ctx.stroke();
   }
 
   function contain(cw, ch, iw, ih) {
@@ -263,6 +308,10 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     const slop = (pointerType === "touch" ? 32 : 16) / screenPerImage;
     let best = null;
     let bestDist = slop;
+    if (markerMode && marker) {
+      const dist = Math.hypot(marker.x - imgPt.x, marker.y - imgPt.y);
+      if (dist <= bestDist) return { list: "marker", index: 0 };
+    }
     for (const list of [points, nearPoints]) {
       for (let i = 0; i < list.length; i++) {
         const dist = Math.hypot(list[i].x - imgPt.x, list[i].y - imgPt.y);
@@ -276,11 +325,16 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   }
 
   function canPlace() {
+    if (markerMode) return true;
     if (points.length < 4) return true;
     return roomMode && nearPoints.length < 4;
   }
 
   function placePoint(imgPt) {
+    if (markerMode) {
+      marker = imgPt;
+      return;
+    }
     if (points.length < 4) points.push(imgPt);
     else nearPoints.push(imgPt);
   }
@@ -298,7 +352,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
       dragList = hit.list;
       dragIndex = hit.index;
       dragMoved = false;
-      showLoupe(event, hit.list[hit.index]);
+      showLoupe(event, hit.list === "marker" ? marker : hit.list[hit.index]);
       return;
     }
     if (canPlace()) {
@@ -314,7 +368,8 @@ export function createPointPicker(canvas, { loupe, onChange }) {
       const imgPt = eventToImage(event, true);
       if (!imgPt) return;
       event.preventDefault();
-      dragList[dragIndex] = imgPt;
+      if (dragList === "marker") marker = imgPt;
+      else dragList[dragIndex] = imgPt;
       dragMoved = true;
       draw();
       showLoupe(event, imgPt);
@@ -417,6 +472,8 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     undo,
     reset,
     setRoomMode,
+    setMarkerMode,
+    setMarker,
     setGuide,
     redraw: draw,
     hideLoupe,

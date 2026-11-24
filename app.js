@@ -17,6 +17,12 @@ import {
   buildPollRequest,
   formatAiError,
 } from "./ai-fill.js";
+import {
+  formatQwenError,
+  markerRadius,
+  rotateDegreesFromMarker,
+  validateQwenBody,
+} from "./netlify/functions/qwen-frontal-logic.js";
 import { fitRoomFrame, layoutRoom, reconstructBox } from "./room3d.js";
 import { fitOutputSize, renderRoomWarp, renderWarp } from "./warp.js";
 
@@ -70,11 +76,16 @@ const picker = createPointPicker($("source-canvas"), {
     undoButton.disabled = !state.canUndo;
     hint.textContent = state.prompt;
     markCorners(state);
+    if (state.markerMode && state.marker && photo) syncRotateFromMarker(state.marker);
     schedulePreview(state.dragging);
   },
 });
 
 let photo = null;
+let originalPhoto = null;
+let workingIsQwen = false;
+let qwenAbort = null;
+let qwenMarker = null;
 let latest = { points: [], dragging: false, canUndo: false, prompt: "" };
 let gains = [1, 1, 1];
 let pickWhite = false;
@@ -97,15 +108,22 @@ fileInput.addEventListener("change", () => {
 undoButton.addEventListener("click", () => picker.undo());
 resetButton.addEventListener("click", () => picker.reset());
 for (const input of document.querySelectorAll('input[name="pick"]')) {
-  input.addEventListener("change", () => {
-    const on = $("pick-room").checked;
-    $("box-panel").hidden = !on;
-    $("preview-hint").textContent = on
-      ? "Eight clicks: the back wall, then the four near corners. The back wall comes out as a rectangle, and the floor runs straight toward you."
-      : "Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.";
-    picker.setRoomMode(on);
-  });
+  input.addEventListener("change", () => syncPickMode());
 }
+$("qwen-run").addEventListener("click", () => runQwen());
+$("qwen-retry").addEventListener("click", () => runQwen());
+$("qwen-cancel").addEventListener("click", () => {
+  if (qwenAbort) qwenAbort.abort();
+});
+$("qwen-original").addEventListener("click", () => useOriginalPhoto());
+$("qwen-fill").addEventListener("click", () => fillQwenCorners());
+$("rotate-degrees").addEventListener("input", () => {
+  $("rotate-value").textContent = `${$("rotate-degrees").value}°`;
+});
+$("angles-strength").addEventListener("input", () => {
+  $("angles-value").textContent = Number($("angles-strength").value).toFixed(1);
+});
+picker.setMarkerMode(true);
 $("fov").addEventListener("input", () => {
   $("fov").dataset.touched = "1";
   $("fov-value").textContent = `${$("fov").value}°`;
@@ -242,16 +260,25 @@ async function openFile(file) {
   dropzone.classList.add("busy");
   try {
     const decoded = await decodeImage(file);
-    if (photo && photo.bitmap && photo.bitmap.close) photo.bitmap.close();
-    photo = {
+    if (photo && photo.bitmap && photo.bitmap !== decoded.bitmap && photo.bitmap.close) photo.bitmap.close();
+    if (originalPhoto && originalPhoto.bitmap && originalPhoto.bitmap !== decoded.bitmap && originalPhoto.bitmap.close) {
+      originalPhoto.bitmap.close();
+    }
+    originalPhoto = {
       bitmap: decoded.bitmap,
       width: decoded.width,
       height: decoded.height,
       name: file.name || "photo",
     };
+    photo = originalPhoto;
+    workingIsQwen = false;
     dropzone.hidden = true;
     workspace.hidden = false;
     fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
+    $("qwen-actions").hidden = true;
+    showQwenBanner("");
+    showQwenProgress("");
+    syncPickMode();
     picker.setImage(photo.bitmap, photo.width, photo.height);
     setStatus("");
     requestAnimationFrame(() => picker.redraw());
@@ -260,6 +287,264 @@ async function openFile(file) {
   } finally {
     dropzone.classList.remove("busy");
   }
+}
+
+function pickMode() {
+  const selected = document.querySelector('input[name="pick"]:checked');
+  return selected ? selected.value : "qwen";
+}
+
+function syncPickMode() {
+  const mode = pickMode();
+  const qwen = mode === "qwen";
+  const room = mode === "room";
+  $("qwen-panel").hidden = !qwen;
+  $("box-panel").hidden = !room;
+  $("corners").hidden = qwen && !workingIsQwen;
+  if (room) {
+    $("preview-hint").textContent = "Eight clicks: the back wall, then the four near corners. The back wall comes out as a rectangle, and the floor runs straight toward you.";
+  } else if (qwen && workingIsQwen) {
+    $("preview-hint").textContent = "Mark the four corners of the frontal wall. This is the same correction as 4 points.";
+  } else if (qwen) {
+    $("preview-hint").textContent = "Qwen rebuilds the photo so the marked wall faces the camera. Then mark its four corners.";
+  } else {
+    $("preview-hint").textContent = "Bottom left is third, then bottom right. Drag a point if a corner sits a pixel off.";
+  }
+  if (qwen && !workingIsQwen) picker.setMarkerMode(true);
+  else picker.setMarkerMode(false);
+  picker.setRoomMode(room);
+}
+
+function syncRotateFromMarker(marker) {
+  const degrees = rotateDegreesFromMarker(marker.x, photo.width);
+  $("rotate-degrees").value = String(degrees);
+  $("rotate-value").textContent = `${degrees}°`;
+}
+
+function showQwenProgress(message) {
+  $("qwen-status").textContent = message;
+  if (message) console.info("[Qwen]", message);
+}
+
+function showQwenBanner(message) {
+  const banner = $("qwen-banner");
+  banner.hidden = !message;
+  banner.textContent = message || "";
+  if (message) console.error("[Qwen]", message);
+}
+
+async function runQwen() {
+  if (qwenAbort) return;
+  if (!photo) {
+    showQwenBanner("Open a photo first.");
+    return;
+  }
+  const source = workingIsQwen ? originalPhoto : photo;
+  const marker = latest.marker || qwenMarker;
+  if (!source || !marker) {
+    showQwenBanner("Click the wall that should face the camera.");
+    return;
+  }
+  const controller = new AbortController();
+  qwenAbort = controller;
+  $("qwen-run").disabled = true;
+  $("qwen-retry").disabled = true;
+  $("qwen-cancel").hidden = false;
+  showQwenBanner("");
+  let predictionId = "";
+  let fileIds = [];
+  try {
+    console.info("[Qwen] GET /.netlify/functions/qwen-frontal?health=1");
+    let healthResponse;
+    try {
+      healthResponse = await fetch("/.netlify/functions/qwen-frontal?health=1", { signal: controller.signal });
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      throw Object.assign(new Error(formatQwenError({ network: true })), { qwen: true });
+    }
+    const health = await readJsonResponse(healthResponse);
+    console.info("[Qwen] health", healthResponse.status, health);
+    if (!healthResponse.ok) throw Object.assign(new Error(formatQwenError({ status: healthResponse.status, payload: health })), { qwen: true });
+    if (health.tokenPresent === false) throw Object.assign(new Error("REPLICATE_API_TOKEN is not set."), { qwen: true });
+
+    qwenMarker = { x: marker.x, y: marker.y };
+    showQwenProgress("Отправка в Qwen…");
+    const image = markedJpeg(source.bitmap, source.width, source.height, marker);
+    const body = {
+      image,
+      rotate_degrees: Number($("rotate-degrees").value),
+      multiple_angles_strength: Number($("angles-strength").value),
+    };
+    const parsed = validateQwenBody(body);
+    if (!parsed.ok) throw Object.assign(new Error(parsed.error), { qwen: true });
+    console.info("[Qwen] POST /.netlify/functions/qwen-frontal", {
+      rotate_degrees: body.rotate_degrees,
+      multiple_angles_strength: body.multiple_angles_strength,
+    });
+    let response;
+    try {
+      response = await fetch("/.netlify/functions/qwen-frontal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      throw Object.assign(new Error(formatQwenError({ network: true })), { qwen: true });
+    }
+    let payload = await readQwenBody(response);
+    predictionId = payload.id || "";
+    fileIds = payload.fileIds || [];
+    const started = Date.now();
+    while (payload.status === "starting" || payload.status === "processing") {
+      if (Date.now() - started > 90000) {
+        throw Object.assign(new Error(formatQwenError({ timeout: true })), { qwen: true });
+      }
+      showQwenProgress("Обработка…");
+      await delay(1500, controller.signal);
+      const pollUrl = `/.netlify/functions/qwen-frontal?id=${encodeURIComponent(payload.id)}&files=${encodeURIComponent(fileIds.join(","))}`;
+      console.info("[Qwen] GET", pollUrl);
+      let pollResponse;
+      try {
+        pollResponse = await fetch(pollUrl, { signal: controller.signal });
+      } catch (error) {
+        if (error.name === "AbortError") throw error;
+        throw Object.assign(new Error(formatQwenError({ network: true })), { qwen: true });
+      }
+      payload = await readQwenBody(pollResponse);
+    }
+    if (payload.status !== "succeeded" || !payload.output) {
+      throw Object.assign(new Error(formatQwenError({
+        status: payload.code,
+        empty: payload.status === "succeeded" && !payload.output,
+        payload,
+      })), { qwen: true });
+    }
+    await adoptQwenImage(payload.output);
+    showQwenBanner("");
+    showQwenProgress("Готово");
+  } catch (error) {
+    if (error.name === "AbortError") {
+      showQwenBanner("");
+      showQwenProgress("Cancelled.");
+      if (predictionId) {
+        fetch(`/.netlify/functions/qwen-frontal?id=${encodeURIComponent(predictionId)}&files=${encodeURIComponent(fileIds.join(","))}&cancel=1`).catch(() => {});
+      }
+    } else {
+      showQwenBanner(error.message || formatQwenError({}));
+      showQwenProgress("");
+    }
+  } finally {
+    qwenAbort = null;
+    $("qwen-cancel").hidden = true;
+    $("qwen-run").disabled = false;
+    $("qwen-retry").disabled = false;
+  }
+}
+
+async function readQwenBody(response) {
+  const payload = await readJsonResponse(response);
+  console.info("[Qwen] response", response.status, payload && payload.status, payload && payload.stage);
+  if (!response.ok || payload.status === "failed") {
+    throw Object.assign(new Error(formatQwenError({ status: payload.code || response.status, payload })), { qwen: true });
+  }
+  return payload;
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text.slice(0, 280) };
+  }
+}
+
+function markedJpeg(bitmap, width, height, marker) {
+  const marked = document.createElement("canvas");
+  marked.width = width;
+  marked.height = height;
+  const ctx = marked.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  const radius = markerRadius(width, height);
+  ctx.beginPath();
+  ctx.arc(marker.x, marker.y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = "#ff0000";
+  ctx.fill();
+  ctx.lineWidth = Math.max(2, radius * 0.08);
+  ctx.strokeStyle = "#ffffff";
+  ctx.stroke();
+  const fitted = fitLongSide(width, height, 1536);
+  const out = document.createElement("canvas");
+  out.width = fitted.width;
+  out.height = fitted.height;
+  out.getContext("2d").drawImage(marked, 0, 0, fitted.width, fitted.height);
+  return out.toDataURL("image/jpeg", 0.9);
+}
+
+async function adoptQwenImage(dataUrl) {
+  const image = await loadDataImage(dataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth || image.width;
+  canvas.height = image.naturalHeight || image.height;
+  canvas.getContext("2d").drawImage(image, 0, 0);
+  const bitmap = typeof createImageBitmap === "function" ? await createImageBitmap(canvas) : canvas;
+  if (workingIsQwen && photo && photo.bitmap && photo.bitmap !== originalPhoto.bitmap && photo.bitmap.close) {
+    photo.bitmap.close();
+  }
+  photo = {
+    bitmap,
+    width: canvas.width,
+    height: canvas.height,
+    name: originalPhoto ? originalPhoto.name : "qwen",
+  };
+  workingIsQwen = true;
+  $("qwen-actions").hidden = false;
+  fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
+  picker.setMarkerMode(false);
+  picker.setImage(bitmap, canvas.width, canvas.height);
+  syncPickMode();
+  previewEmpty.textContent = "The frontal view appears here after the fourth corner.";
+}
+
+function useOriginalPhoto() {
+  if (!originalPhoto) return;
+  if (workingIsQwen && photo && photo.bitmap && photo.bitmap !== originalPhoto.bitmap && photo.bitmap.close) {
+    photo.bitmap.close();
+  }
+  photo = originalPhoto;
+  workingIsQwen = false;
+  $("qwen-actions").hidden = true;
+  fileMeta.textContent = `${photo.width.toLocaleString()} × ${photo.height.toLocaleString()}`;
+  showQwenBanner("");
+  showQwenProgress("");
+  picker.setImage(photo.bitmap, photo.width, photo.height);
+  syncPickMode();
+  if (qwenMarker) picker.setMarker(qwenMarker);
+}
+
+async function fillQwenCorners() {
+  const plan = currentPlan();
+  if (!plan) {
+    showQwenBanner("Place the four corners of the frontal wall first.");
+    return;
+  }
+  const rendered = await renderPlan(plan, { maxEdge: 900 });
+  const pixels = rendered.canvas.getContext("2d", { willReadFrequently: true })
+    .getImageData(0, 0, rendered.canvas.width, rendered.canvas.height);
+  if (!maskFromAlpha(pixels.data).hasEmpty) {
+    showQwenBanner("This frame has no empty corners.");
+    return;
+  }
+  showQwenBanner("");
+  if (frameMode() !== "ai") {
+    $("mode-ai").checked = true;
+    aiPanel.hidden = false;
+    frameNote.textContent = frameNoteText();
+  }
+  runAiFill();
 }
 
 function schedulePreview(dragging) {
@@ -672,6 +957,8 @@ function canvasToBlob(canvas, type, qualityValueNumber) {
 }
 
 function markCorners(state) {
+  const qwenStep = state.markerMode;
+  $("corners").hidden = qwenStep;
   const box = $("pick-room").checked;
   const count = state.points.length + (box ? (state.near || []).length : 0);
   const total = box ? 8 : 4;
