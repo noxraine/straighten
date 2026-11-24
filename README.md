@@ -5,12 +5,8 @@ Perspective correction for interior photos. Mark a wall, let Qwen turn the camer
 ## Use it
 
 1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
-2. Click the wall in order: **top left, top right, bottom right, bottom left**. **Выпрямить стену (AI)** sends the original photo (max 1536 px JPEG) with a hidden camera estimate. The turn is logged as `[Qwen]`.
-3. The result replaces the working photo. **Поворот**, **Наклон**, and **Масштаб** preview a local homography and are what export uses until you add four corners (top left, top right, bottom left, bottom right) for the ordinary rectangle correction. **Повторить в Qwen** sends the original again with the slider rotation and tilt added to the estimate. **Сбросить** restores the upload. **Достроить углы (AI)** fills empty corners with LaMa.
-4. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
-5. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
-6. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
-7. Download a JPEG (white fill in the empty corners, with a quality slider) or a PNG (those corners stay transparent). **Download ZIP** packs `straightened.jpg`, `mask.png` (white is photo, black is empty), and `straightened_alpha.png` when the frame has empty corners. The export is full resolution, up to what the browser can encode.
+2. Click the wall in order: **top left, top right, bottom right, bottom left**. The page shows only a direction, such as «Направление: влево, вверх», with no angles.
+3. **Выпрямить стену (AI)** sends the original photo (max 1536 px JPEG) and a prompt for that direction. The result is the frontal photo. **Скачать** saves the PNG. **Повторить** sends the original again. **Новое фото** starts over.
 
 Mouse and touch both work, including on an iPad.
 
@@ -40,9 +36,7 @@ node scripts/make-sample.mjs
 
 ## Qwen camera
 
-The four clicks are mapped to a unit rectangle. With a 60° horizontal focal length and the principal point at the image center, that homography yields the wall normal. `rotate_degrees` is the negation of `atan2(nx, nz)` so a wall facing to the right of the camera (positive x) is a right turn; Qwen treats positive as rotate left. `vertical_tilt` is `-pitch / 45°`, so a low viewpoint is positive and a top-down view is negative. A bad decomposition falls back to edge lengths: a longer right side turns the camera right, a wider bottom edge is a low angle.
-
-**Выпрямить стену (AI)** posts the original JPEG to `/.netlify/functions/qwen-frontal`, which calls `POST https://api.replicate.com/v1/models/qwen/qwen-edit-multiangle/predictions` with prompt `preserve all existing content, camera rotation only`, those two angles, `move_forward` 0, `use_wide_angle` false, `multiple_angles_strength` 1, `go_fast`, `use_multiple_angles`, `aspect_ratio=match_input_image`, and `output_format=png`. The fine-tune sliders use `H = Zoom · K · Ry · Rx · K⁻¹` only on the result. Polling, health, and error stages match the inpaint function.
+The four clicks are mapped to a unit rectangle. With a 60° horizontal focal length and the principal point at the image center, that homography yields the wall normal. `rotate_degrees` is the negation of `atan2(nx, nz)`: a wall facing to the camera’s right is a right turn, and Qwen treats positive as rotate left. `vertical_tilt` is `-pitch / 45°` (`-1` top-down, `+1` low angle). Above 3° the turn is “left” or “right”; above 0.1 the tilt is “up” or “down”. Otherwise that axis is none. The request itself sends `rotate_degrees` 0 and `vertical_tilt` 0. The prompt names the direction, for example “Rotate the camera to the left and look up until the wall is perfectly frontal…”. A prompt longer than 500 characters is rejected. Polling, health, and error stages match the inpaint function.
 
 ## AI fill
 

@@ -76,6 +76,7 @@ async function create(parsed) {
     body: JSON.stringify({
       input: buildQwenInput({
         image,
+        prompt: parsed.prompt,
         rotateDegrees: parsed.rotateDegrees,
         verticalTilt: parsed.verticalTilt,
         moveForward: parsed.moveForward,

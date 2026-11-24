@@ -7,6 +7,9 @@ import { invert3x3, multiply3x3, solveHomography } from "../../homography.js";
 
 export const QWEN_MODEL_PATH = "/models/qwen/qwen-edit-multiangle/predictions";
 export const QWEN_PROMPT = "preserve all existing content, camera rotation only";
+export const YAW_DEADZONE = 3;
+export const TILT_DEADZONE = 0.1;
+const KEEP = "Keep all existing walls, doors and windows exactly as they are. No new objects.";
 
 const MAX_DATA_URL_CHARS = 8_000_000;
 
@@ -34,10 +37,43 @@ export function clampStrength(value) {
   return Math.round(clamp(number, 0, 2) * 100) / 100;
 }
 
+export function wallDirection(estimate) {
+  const rotate = estimate && Number.isFinite(estimate.rotateDegrees) ? estimate.rotateDegrees : 0;
+  const tilt = estimate && Number.isFinite(estimate.verticalTilt) ? estimate.verticalTilt : 0;
+  return {
+    horizontal: rotate > YAW_DEADZONE ? "left" : rotate < -YAW_DEADZONE ? "right" : "none",
+    vertical: tilt > TILT_DEADZONE ? "up" : tilt < -TILT_DEADZONE ? "down" : "none",
+  };
+}
+
+export function directionPrompt(direction) {
+  const look = direction.vertical === "up" ? " and look up" : direction.vertical === "down" ? " and look down" : "";
+  if (direction.horizontal === "left") {
+    return `Rotate the camera to the left${look} until the wall is perfectly frontal, centered and perpendicular. ${KEEP}`;
+  }
+  if (direction.horizontal === "right") {
+    return `Rotate the camera to the right${look} until the wall is perfectly frontal, centered and perpendicular. ${KEEP}`;
+  }
+  if (direction.vertical === "up") {
+    return `Tilt the camera to look up until the wall is perfectly frontal, centered and perpendicular. ${KEEP}`;
+  }
+  if (direction.vertical === "down") {
+    return `Tilt the camera to look down until the wall is perfectly frontal, centered and perpendicular. ${KEEP}`;
+  }
+  return `Make the wall perfectly frontal, centered and perpendicular. ${KEEP}`;
+}
+
+export function directionLabel(direction) {
+  const horizontal = { left: "влево", right: "вправо" }[direction.horizontal];
+  const vertical = { up: "вверх", down: "вниз" }[direction.vertical];
+  const parts = [horizontal, vertical].filter(Boolean);
+  return parts.length ? `Направление: ${parts.join(", ")}` : "Направление: фронтально";
+}
+
 export function buildQwenInput(controls = {}) {
   return {
     image: controls.image,
-    prompt: QWEN_PROMPT,
+    prompt: acceptedPrompt(controls.prompt),
     aspect_ratio: "match_input_image",
     go_fast: true,
     use_multiple_angles: true,
@@ -160,9 +196,14 @@ export function validateQwenBody(body) {
   }
   const image = checkImage(body.image);
   if (!image.ok) return image;
+  const prompt = acceptedPrompt(body.prompt);
+  if (typeof body.prompt === "string" && body.prompt.length > 500) {
+    return { ok: false, status: 400, error: "prompt is too long." };
+  }
   return {
     ok: true,
     image: body.image,
+    prompt,
     rotateDegrees: clampRotate(body.rotate_degrees),
     verticalTilt: clampTilt(body.vertical_tilt),
     moveForward: clampForward(body.move_forward),
@@ -180,6 +221,11 @@ export function formatQwenError(info = {}) {
   const text = firstText(payload.error) || firstText(payload.detail);
   if (status) return text ? `Replicate ${status}: ${text}` : `Replicate ${status}`;
   return text || "Qwen failed.";
+}
+
+function acceptedPrompt(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > 500) return QWEN_PROMPT;
+  return value.trim();
 }
 
 function rotX(angle) {

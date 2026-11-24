@@ -4,10 +4,12 @@ import { applyHomography } from "../homography.js";
 import {
   QWEN_PROMPT,
   buildQwenInput,
+  directionPrompt,
   estimateCameraFromQuad,
   formatQwenError,
   previewHomography,
   validateQwenBody,
+  wallDirection,
 } from "../netlify/functions/qwen-frontal-logic.js";
 import { replicateFailure } from "../netlify/functions/inpaint-logic.js";
 
@@ -56,6 +58,21 @@ test("a turned wall estimates the camera turn, and a frontal wall stays near zer
   assert.ok(Math.abs(frontal.verticalTilt) <= 0.08, `frontal tilt ${frontal.verticalTilt}`);
   const turned = estimateCameraFromQuad(wall(25 * Math.PI / 180), width, height);
   assert.ok(turned.rotateDegrees < -12 && turned.rotateDegrees > -40, `turned yaw ${turned.rotateDegrees}`);
+});
+
+test("a left-up wall and a frontal wall get different prompts", () => {
+  const leftUp = wallDirection({ rotateDegrees: 12, verticalTilt: 0.4 });
+  assert.equal(
+    directionPrompt(leftUp),
+    "Rotate the camera to the left and look up until the wall is perfectly frontal, centered and perpendicular. Keep all existing walls, doors and windows exactly as they are. No new objects.",
+  );
+  const none = wallDirection({ rotateDegrees: 3, verticalTilt: -0.1 });
+  assert.deepEqual(none, { horizontal: "none", vertical: "none" });
+  assert.equal(
+    directionPrompt(none),
+    "Make the wall perfectly frontal, centered and perpendicular. Keep all existing walls, doors and windows exactly as they are. No new objects.",
+  );
+  assert.equal(validateQwenBody({ image: "data:image/jpeg;base64,aa", prompt: "x".repeat(501) }).status, 400);
 });
 
 test("the Qwen input is a camera edit of the original image", () => {
