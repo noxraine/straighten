@@ -8,3 +8,6 @@
 
 [functions.inpaint]
   timeout = 26
+
+[functions.qwen-frontal]
+  timeout = 26
