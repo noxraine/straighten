@@ -1,33 +1,31 @@
 /**
- * Pure request building for the Qwen frontal edit.
- * The browser draws the red marker and sends a JPEG; this module turns that
- * into the official qwen/qwen-edit-multiangle input.
+ * Camera controls for qwen/qwen-edit-multiangle, plus the local preview homography.
+ * The preview is illustrative. Only the clamped slider values are sent to Qwen.
  */
+
+import { invert3x3, multiply3x3 } from "../../homography.js";
 
 export const QWEN_MODEL_PATH = "/models/qwen/qwen-edit-multiangle/predictions";
-export const QWEN_PROMPT = "make the wall with the red marker the frontal wall, perfect eye-level perpendicular view, keep doors and windows as rectangles, same room and materials, remove the red marker";
+export const QWEN_PROMPT = "preserve all existing content, camera rotation only, no new objects";
 
 const MAX_DATA_URL_CHARS = 8_000_000;
-
-export function markerRadius(width, height) {
-  return 0.02 * Math.min(width, height);
-}
-
-/**
- * Camera hint from where the marker sits.
- * A marker on the left (dx < 0) yields a positive rotate_degrees, which the
- * model documents as "rotate left". The automatic hint stays inside ±45°.
- */
-export function rotateDegreesFromMarker(markerX, width) {
-  if (!(width > 0) || !Number.isFinite(markerX)) return 0;
-  const dx = markerX / width - 0.5;
-  return Math.round(clamp(-dx * 90, -45, 45)) + 0;
-}
 
 export function clampRotate(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;
   return Math.round(clamp(number, -90, 90));
+}
+
+export function clampTilt(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(clamp(number, -1, 1) * 10) / 10;
+}
+
+export function clampForward(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(clamp(number, 0, 5) * 2) / 2;
 }
 
 export function clampStrength(value) {
@@ -36,20 +34,44 @@ export function clampStrength(value) {
   return Math.round(clamp(number, 0, 2) * 100) / 100;
 }
 
-export function buildQwenInput({ image, rotateDegrees = 0, multipleAnglesStrength = 1 } = {}) {
+export function buildQwenInput(controls = {}) {
   return {
-    image,
+    image: controls.image,
     prompt: QWEN_PROMPT,
     aspect_ratio: "match_input_image",
     go_fast: true,
     use_multiple_angles: true,
-    vertical_tilt: 0,
-    move_forward: 0,
-    use_wide_angle: false,
     output_format: "png",
-    rotate_degrees: clampRotate(rotateDegrees),
-    multiple_angles_strength: clampStrength(multipleAnglesStrength),
+    rotate_degrees: clampRotate(controls.rotateDegrees),
+    vertical_tilt: clampTilt(controls.verticalTilt),
+    move_forward: clampForward(controls.moveForward),
+    use_wide_angle: Boolean(controls.useWideAngle),
+    multiple_angles_strength: clampStrength(controls.multipleAnglesStrength),
   };
+}
+
+/**
+ * Illustrative homography, never uploaded.
+ * H = Zoom * K * Ry(yaw) * Rx(pitch) * K^-1.
+ * Positive rotate_degrees turns the camera left, so the center of the photo
+ * moves right. vertical_tilt is a fraction of 30°. Strength scales both angles.
+ * Wide angle uses an 80° field of view instead of 60°.
+ */
+export function previewHomography(width, height, controls = {}) {
+  const wide = Boolean(controls.useWideAngle);
+  const fov = (wide ? 80 : 60) * Math.PI / 180;
+  const focal = width / (2 * Math.tan(fov / 2));
+  const cx = width / 2;
+  const cy = height / 2;
+  const strength = clampStrength(controls.multipleAnglesStrength);
+  const yaw = clampRotate(controls.rotateDegrees) * strength * Math.PI / 180;
+  const pitch = clampTilt(controls.verticalTilt) * 30 * strength * Math.PI / 180;
+  const zoom = 1 + clampForward(controls.moveForward) * 0.15;
+  const K = [focal, 0, cx, 0, focal, cy, 0, 0, 1];
+  const R = multiply3x3(rotY(yaw), rotX(pitch));
+  const rotation = multiply3x3(K, multiply3x3(R, invert3x3(K)));
+  const Z = [zoom, 0, cx * (1 - zoom), 0, zoom, cy * (1 - zoom), 0, 0, 1];
+  return multiply3x3(Z, rotation);
 }
 
 export function validateQwenBody(body) {
@@ -68,6 +90,9 @@ export function validateQwenBody(body) {
     ok: true,
     image: body.image,
     rotateDegrees: clampRotate(body.rotate_degrees),
+    verticalTilt: clampTilt(body.vertical_tilt),
+    moveForward: clampForward(body.move_forward),
+    useWideAngle: Boolean(body.use_wide_angle),
     multipleAnglesStrength: clampStrength(body.multiple_angles_strength),
   };
 }
@@ -81,6 +106,18 @@ export function formatQwenError(info = {}) {
   const text = firstText(payload.error) || firstText(payload.detail);
   if (status) return text ? `Replicate ${status}: ${text}` : `Replicate ${status}`;
   return text || "Qwen failed.";
+}
+
+function rotX(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [1, 0, 0, 0, c, -s, 0, s, c];
+}
+
+function rotY(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [c, 0, s, 0, 1, 0, -s, 0, c];
 }
 
 function checkImage(value) {

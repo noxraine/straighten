@@ -77,6 +77,9 @@ async function create(parsed) {
       input: buildQwenInput({
         image,
         rotateDegrees: parsed.rotateDegrees,
+        verticalTilt: parsed.verticalTilt,
+        moveForward: parsed.moveForward,
+        useWideAngle: parsed.useWideAngle,
         multipleAnglesStrength: parsed.multipleAnglesStrength,
       }),
     }),

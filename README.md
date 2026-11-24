@@ -4,8 +4,9 @@ Perspective correction for interior photos. Mark the four corners of a wall or w
 
 ## Use it
 
-1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected. **AI Frontal (Qwen)** is the default. Click the wall that should face the camera, then **Сделать фронтальной (AI)**. Qwen returns a new photo; mark its four corners and the ordinary correction runs. **4 points** and **Box room** stay available.
-2. In 4 points, click the corners in order: **top left, top right, bottom left, bottom right**. The list beside the photo shows which corner is next. Drag any point to nudge it; a magnifier follows the pointer. Reset clears the corners, Undo steps back one point. **Box room** replaces that flow with eight clicks: the same four back-wall corners, then the near ceiling-left, ceiling-right, floor-left, and floor-right. A small diagram marks the next corner. Near corners may sit on the padded margin just outside the photo, and a click anywhere on a depth edge is accepted. The gold wire on the photo is the snapped box.
+1. Open the site and drop a JPEG, PNG, or WebP (HEIC when the browser can decode it). Large phone photos are fine. EXIF orientation is respected.
+2. The sliders (**Поворот**, **Наклон**, **Приближение**, **Широкий угол**, **Сила эффекта**) draw a local camera preview. It is not uploaded. **Отправить в Qwen** sends the original photo, downscaled to 1536 pixels, with those slider values.
+3. Qwen’s picture replaces the working photo. Click its wall corners in order: **top left, top right, bottom left, bottom right**. Drag a point to nudge it. **Повторить** sends the original again. **Сбросить** restores the upload and the default sliders. **Достроить углы (AI)** fills empty corners with LaMa when the frame has any.
 3. The corrected preview updates as you drag. **Whole frame** is the default: the warped photo is translated and scaled uniformly so the entire frame fits, empty corners included. **Max crop** takes the largest axis-aligned rectangle that sits inside the warped photo, so the export has no empty corners. **Crop to selection** keeps only the surface you marked. Correction strength runs from a gentle nudge at 0% to a fully frontal view at 100%.
 4. The proportion starts from the average of the opposite edges. If you know the real size (a wall that is 3.2 by 2.4, in any unit), enter both numbers to lock the ratio.
 5. Optional adjustments apply to the preview and the download. **Pick white** samples a small patch on the result and balances the channels. **Clarity** is a light unsharp mask from 0 to 30.
@@ -37,13 +38,15 @@ Regenerate the built-in sample wall with:
 node scripts/make-sample.mjs
 ```
 
-## AI Frontal (Qwen)
+## Qwen camera
 
-The default mode sends the photo to Replicate’s `qwen/qwen-edit-multiangle` through `netlify/functions/qwen-frontal.js`. The browser draws a red circle (radius 2% of the short side, `#ff0000`, thin white outline) on a JPEG no longer than 1536 pixels and posts it with `rotate_degrees` and `multiple_angles_strength`. The rotation hint is `round(clamp(-(markerX / width - 0.5) * 90, -45, 45))`: a marker on the left is a positive “rotate left”. Advanced can override that from -90° to 90°, and the angle strength from 0 to 2. The function calls `POST https://api.replicate.com/v1/models/qwen/qwen-edit-multiangle/predictions` with `Prefer: wait=8`, `vertical_tilt` 0, and `output_format` png. The page polls `GET /.netlify/functions/qwen-frontal?id=…` the same way as inpaint. Status text is «Отправка в Qwen…», «Обработка…», and «Готово». `GET ?health=1` returns `{ "tokenPresent": true }` without calling Replicate. Errors keep the status code and a `stage`. **Повторить** runs it again. **Использовать оригинал** restores the upload. After the result is the working image, four clicks use the same homography as 4-point mode. **Достроить углы (AI)** sends empty corners to the existing LaMa fill when the frame still has them.
+Sliders preview `H = Zoom · K · Ry(yaw) · Rx(pitch) · K⁻¹` in WebGL. Focal length is `width / (2 tan(30°))`, or an 80° field of view when **Широкий угол** is on. Positive **Поворот** turns the camera left. **Наклон** is a fraction of 30°. **Приближение** zooms about the center by `1 + 0.15 × move_forward`. **Сила эффекта** scales the two angles. None of that homography is sent.
+
+**Отправить в Qwen** posts the original JPEG to `/.netlify/functions/qwen-frontal`, which calls `POST https://api.replicate.com/v1/models/qwen/qwen-edit-multiangle/predictions` with prompt `preserve all existing content, camera rotation only, no new objects`, the five camera inputs, `aspect_ratio=match_input_image`, `go_fast`, `use_multiple_angles`, and `output_format=png`. Polling, health, and error stages match the inpaint function.
 
 ## AI fill
 
-AI fill is optional. Choosing **AI fill** sends the whole-frame result and a mask to [Replicate LaMa](https://replicate.com/twn39/lama) (`twn39/lama`, version `bb9dd3362d559d0953b1d57ec9817f222c162e90047039b1b4af45c47b0b9af9`, inputs `image` and `mask`) through `POST /.netlify/functions/inpaint`. The page then polls `GET /.netlify/functions/inpaint?id=…`. Status text reads “Sending to Replicate…”, “Processing…”, and “Done”. The function reads `process.env.REPLICATE_API_TOKEN` for both the Netlify v1 handler and the v2 default export. `GET /.netlify/functions/inpaint?health=1` returns `{ "tokenPresent": true }` or `false` and does not call Replicate. A failure shows a banner with the HTTP status and the function’s error text, including `Replicate 402: insufficient credit` when the account cannot pay for the prediction. The error JSON includes a `stage` of `validate`, `create`, `poll`, or `fetch-output`. Replicate keeps an uploaded file for about a day and a prediction output for a limited time; the function deletes the uploaded inputs when the run finishes or is cancelled. If the fill fails, the preview stays on the scale-to-fit result.
+**Достроить углы (AI)** sends the whole-frame result and a mask to [Replicate LaMa](https://replicate.com/allenhooo/lama) (`allenhooo/lama`, version `cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72`, inputs `image` and `mask`) through `POST /.netlify/functions/inpaint`, and only when the frame has empty pixels. The page polls `GET /.netlify/functions/inpaint?id=…`. The function reads `process.env.REPLICATE_API_TOKEN`. `GET ?health=1` returns `{ "tokenPresent": true }` or `false` and does not call Replicate. A failure shows a banner, including `Replicate 402: insufficient credit`. The error JSON includes a `stage` of `validate`, `create`, `poll`, or `fetch-output`.
 
 ## Deploy on Netlify
 
@@ -55,6 +58,8 @@ The site is the repository itself: `index.html`, the ES modules, `styles.css`, a
 - **Build command:** `echo No build step` (a no-op)
 
 Connect the repo in Netlify, or drag this folder onto [Netlify Drop](https://app.netlify.com/drop). No environment variables are required.
+
+Box room and the one-point marker flow are not in the page. Their modules remain in the repository.
 
 ## Box room
 
