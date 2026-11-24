@@ -19,7 +19,7 @@
         <p class="eyebrow"><span class="swatch" aria-hidden="true"></span> Perspective correction</p>
         <h1>Straighten</h1>
       </div>
-      <p class="lede">Click the wall that should face you, or mark its corners yourself. AI Frontal sends that photo only when you ask. 4 points and Box room stay on this device.</p>
+      <p class="lede">Set the camera, send the original photo to Qwen, then mark the four corners of the wall that should be square.</p>
     </header>
 
     <div id="dropzone" class="dropzone">
@@ -52,76 +52,46 @@
               <button type="button" class="ghost" id="replace">Replace</button>
             </div>
           </div>
-          <div class="choice pick-choice">
-            <label>
-              <input type="radio" name="pick" id="pick-qwen" value="qwen" checked>
-              <span>AI Frontal (Qwen)</span>
-            </label>
-            <label>
-              <input type="radio" name="pick" id="pick-wall" value="wall">
-              <span>4 points</span>
-            </label>
-            <label>
-              <input type="radio" name="pick" id="pick-room" value="room">
-              <span>Box room</span>
-            </label>
-          </div>
           <div id="qwen-panel">
+            <div class="quality">
+              <label for="rotate-degrees">Поворот <span id="rotate-value">0°</span></label>
+              <input id="rotate-degrees" type="range" min="-90" max="90" value="0" step="1">
+            </div>
+            <div class="quality">
+              <label for="vertical-tilt">Наклон <span id="tilt-value">0</span></label>
+              <input id="vertical-tilt" type="range" min="-1" max="1" value="0" step="0.1">
+            </div>
+            <div class="quality">
+              <label for="move-forward">Приближение <span id="forward-value">0</span></label>
+              <input id="move-forward" type="range" min="0" max="5" value="0" step="0.5">
+            </div>
+            <label class="checkline">
+              <input type="checkbox" id="wide-angle">
+              <span>Широкий угол</span>
+            </label>
+            <div class="quality">
+              <label for="angles-strength">Сила эффекта <span id="angles-value">1.0</span></label>
+              <input id="angles-strength" type="range" min="0" max="2" value="1" step="0.1">
+            </div>
             <p id="qwen-banner" class="ai-banner" hidden role="alert"></p>
             <div class="board-actions">
-              <button type="button" class="primary" id="qwen-run">Сделать фронтальной (AI)</button>
+              <button type="button" class="primary" id="qwen-run">Отправить в Qwen</button>
               <button type="button" class="ghost" id="qwen-cancel" hidden>Cancel</button>
             </div>
             <p id="qwen-status" class="note" role="status"></p>
-            <details id="qwen-advanced">
-              <summary>Advanced</summary>
-              <div class="quality">
-                <label for="rotate-degrees">Rotate <span id="rotate-value">0°</span></label>
-                <input id="rotate-degrees" type="range" min="-90" max="90" value="0" step="1">
-              </div>
-              <div class="quality">
-                <label for="angles-strength">Angle strength <span id="angles-value">1.0</span></label>
-                <input id="angles-strength" type="range" min="0" max="2" value="1" step="0.1">
-              </div>
-              <p class="note">Positive rotate turns the camera left. 0° is eye level. The strength slider is how hard Qwen pushes the new angle.</p>
-            </details>
             <div id="qwen-actions" class="board-actions" hidden>
               <button type="button" class="ghost" id="qwen-retry">Повторить</button>
-              <button type="button" class="ghost" id="qwen-original">Использовать оригинал</button>
+              <button type="button" class="ghost" id="qwen-original">Сбросить</button>
               <button type="button" class="ghost" id="qwen-fill">Достроить углы (AI)</button>
             </div>
           </div>
-          <ol class="corners" id="corners">
+          <ol class="corners" id="corners" hidden>
             <li>Top left</li>
             <li>Top right</li>
             <li>Bottom left</li>
             <li>Bottom right</li>
-            <li class="box-only" hidden>Near ceiling left</li>
-            <li class="box-only" hidden>Near ceiling right</li>
-            <li class="box-only" hidden>Near floor left</li>
-            <li class="box-only" hidden>Near floor right</li>
           </ol>
-          <div id="box-diagram" class="box-diagram" hidden>
-            <svg viewBox="0 0 160 108" aria-hidden="true">
-              <g fill="none" stroke="#8a8175" stroke-width="1.4">
-                <polygon points="16,14 144,14 128,94 32,94"></polygon>
-                <polygon points="46,32 114,32 106,74 54,74"></polygon>
-                <line x1="16" y1="14" x2="46" y2="32"></line>
-                <line x1="144" y1="14" x2="114" y2="32"></line>
-                <line x1="32" y1="94" x2="54" y2="74"></line>
-                <line x1="128" y1="94" x2="106" y2="74"></line>
-              </g>
-              <circle data-corner="4" cx="16" cy="14" r="5.5"></circle>
-              <circle data-corner="5" cx="144" cy="14" r="5.5"></circle>
-              <circle data-corner="0" cx="46" cy="32" r="5.5"></circle>
-              <circle data-corner="1" cx="114" cy="32" r="5.5"></circle>
-              <circle data-corner="2" cx="54" cy="74" r="5.5"></circle>
-              <circle data-corner="3" cx="106" cy="74" r="5.5"></circle>
-              <circle data-corner="6" cx="32" cy="94" r="5.5"></circle>
-              <circle data-corner="7" cx="128" cy="94" r="5.5"></circle>
-            </svg>
-          </div>
-          <p id="hint" class="hint">Click the wall that should face the camera.</p>
+          <p id="hint" class="hint">The sliders preview a camera move. Qwen receives the original photo.</p>
           <div class="frame" id="source-frame">
             <canvas id="source-canvas" aria-label="Photo. Click the corners in the order shown."></canvas>
           </div>
@@ -159,10 +129,6 @@
               <input type="radio" name="frame" id="mode-crop" value="crop">
               <span>Crop to selection</span>
             </label>
-            <label>
-              <input type="radio" name="frame" id="mode-ai" value="ai">
-              <span>AI fill</span>
-            </label>
           </div>
           <div id="ai-panel" hidden>
             <p id="ai-banner" class="ai-banner" hidden role="alert"></p>
@@ -179,20 +145,6 @@
             <input id="strength" type="range" min="0" max="100" value="100">
           </div>
           <p class="note">100% looks straight at the wall. Lower it for a gentler shift.</p>
-          <div id="box-panel" hidden>
-            <div class="quality">
-              <label for="fov">Lens / FOV <span id="fov-value">60°</span></label>
-              <input id="fov" type="range" min="18" max="110" value="60" step="1">
-            </div>
-              <p id="lens-note" class="note">Changes how far the floor and side walls extend. The back wall stays a rectangle.</p>
-            <div class="board-actions">
-              <button type="button" class="ghost" id="fov-reset">Use estimate</button>
-            </div>
-            <label class="checkline">
-              <input type="checkbox" id="wireframe">
-              <span>Wireframe on the result</span>
-            </label>
-          </div>
         </section>
 
         <section>
@@ -246,7 +198,7 @@
           <p id="status" class="status" role="status"></p>
         </section>
 
-        <p class="privacy">Nothing is uploaded. Closing the tab discards the photo.</p>
+        <p class="privacy">Qwen and corner fill upload the photo for that run. Closing the tab discards the local copy.</p>
       </aside>
     </div>
   </div>

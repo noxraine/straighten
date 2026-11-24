@@ -46,6 +46,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   let marker = null;
   let markerMode = false;
   let roomMode = false;
+  let enabled = true;
   let undoStack = [];
   let dragIndex = -1;
   let dragList = null;
@@ -136,6 +137,19 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     emit(false);
   }
 
+  function setEnabled(on) {
+    enabled = Boolean(on);
+    if (!enabled) {
+      points = [];
+      nearPoints = [];
+      marker = null;
+      markerMode = false;
+      roomMode = false;
+    }
+    draw();
+    emit(false);
+  }
+
   function setMarker(point) {
     marker = point ? { x: point.x, y: point.y } : null;
     draw();
@@ -161,6 +175,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   }
 
   function roomPrompt() {
+    if (!enabled) return "The sliders preview a camera move. Qwen receives the original photo.";
     if (markerMode) {
       return marker
         ? "Click again to move the marker, then make the wall frontal."
@@ -340,7 +355,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
   }
 
   function onPointerDown(event) {
-    if (!image || (activePointer !== null && event.pointerId !== activePointer)) return;
+    if (!enabled || !image || (activePointer !== null && event.pointerId !== activePointer)) return;
     const imgPt = eventToImage(event, false);
     if (!imgPt) return;
     event.preventDefault();
@@ -474,6 +489,7 @@ export function createPointPicker(canvas, { loupe, onChange }) {
     setRoomMode,
     setMarkerMode,
     setMarker,
+    setEnabled,
     setGuide,
     redraw: draw,
     hideLoupe,
